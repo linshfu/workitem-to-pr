@@ -1,0 +1,31 @@
+{
+  "_comment": "Template for config.json (which is gitignored). Copy to config.json and adjust. Secrets (Slack token) go in config.local.json.",
+  "azureOrg": "https://dev.azure.com/your-org",
+  "workItemProject": "YourTeamProject",
+  "projectListExcludes": [ "SomeProjectPrefix*" ],
+  "azureProjectMappings": {
+    "myapp": {
+      "azureProject": "MyApp",
+      "azureRepository": "MyApp-Web",
+      "localPath": "C:\\code\\myapp",
+      "areaPath": "YourTeamProject\\Product\\MyApp",
+      "aliases": ["我的專案"]
+    },
+    "another": {
+      "azureProject": "Another Project",
+      "azureRepository": "another-web",
+      "localPath": "C:\\code\\another",
+      "defaultBranch": "main"
+    }
+  },
+  "projectPaths": {
+    "myapp": "C:\\code\\myapp",
+    "another": "C:\\code\\another"
+  },
+  "slackConfig": {
+    "channel": "your-review-channel",
+    "members": [
+      { "key": "DisplayName (RealName)", "value": "U0XXXXXXXX" }
+    ]
+  }
+}

@@ -1,0 +1,10 @@
+# Local config / secrets — never commit
+config.json
+config.local.json
+*.local.json
+
+# Local env file (use env.example.txt as the reference)
+env.txt
+
+# Throwaway / scratch scripts
+__*.ps1

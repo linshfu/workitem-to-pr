@@ -1,0 +1,4 @@
+{
+  "_comment": "Copy to config.local.json (gitignored). Holds secrets only. The Slack token is also auto-saved here the first time you enter it.",
+  "slackToken": "xoxb-your-bot-token-here"
+}
