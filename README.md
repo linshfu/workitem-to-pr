@@ -91,6 +91,17 @@ az login
 az extension add --name azure-devops
 ```
 
+> **登入報錯 `Found multiple accounts with the same username`？**
+> 代表你的公司 email 同時綁了「工作帳號」和「個人 Microsoft 帳號」，Windows 帳號代理（WAM）把兩個都快取住了（[azure-cli 已知問題](https://github.com/Azure/azure-cli/issues/20168)）。解法：
+>
+> ```powershell
+> az account clear
+> az config set core.enable_broker_on_windows=false
+> az login --tenant <公司租戶ID>
+> ```
+>
+> 公司租戶 ID 可從錯誤訊息裡取得：兩個帳號中 `realm` **不是** `9188040d-6c67-...`（個人帳號固定租戶）的那個就是。瀏覽器跳出時選「工作或學校帳戶」，登入後 `az account show` 確認 `tenantId` 正確。
+
 ### 4. 設定 `vl` 別名（建議）
 
 把下面這段加進 PowerShell profile（`notepad $PROFILE`，檔案不存在就直接存新檔）：
