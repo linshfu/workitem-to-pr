@@ -191,8 +191,12 @@ vl 34429 -NewTask "[MyApp][前端] 列表頁手機版 Header 對齊"
 ### 1.2 一次建立多張 Task
 
 ```powershell
-vl 34429 -NewTask "[MyApp][前端] 標題A","[MyApp][前端] 標題B"
+vl 34429 "[MyApp][前端] 標題A" "[MyApp][前端] 標題B"
 ```
+
+標題直接接在 ID 後面、各自加引號、空白分隔即可（不需 `-NewTask` 旗標）。相容具名 + 逗號寫法：`vl 34429 -NewTask "A","B"`。
+
+> ⚠️ 不要用「旗標 + 空白」`-NewTask "A" "B"`——Windows PowerShell 5.1 的參數綁定會失敗（`PositionalParameterNotFound`）。空白分隔請不加旗標，或改用逗號。
 
 適合「先寫 code、後補單」——一個 commit 對一張 Task。建立後列出**新建＋既有** Task 讓你多選 PR 要連結哪些（直接 Enter＝只連結新建的；第一個選擇作為分支命名的主要 Task），最後**一張 PR 同時連結所有選中的 Task**。
 

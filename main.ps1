@@ -1,4 +1,5 @@
-﻿param(
+﻿[CmdletBinding(PositionalBinding = $false)]
+param(
     [Parameter(Position = 0)]
     [int]$WorkItemId,
     [switch]$Help,
@@ -13,8 +14,13 @@
     [switch]$DryRun,
     [string]$SearchKeyword = "",
     [switch]$TestSlackMessage,
-    [string[]]$NewTask = @(),
-    [switch]$NewPbi
+    [switch]$NewPbi,
+    # 標題可直接接在 ID 之後（空白分隔、各自加引號），例如：
+    #   vl 34591 "[Chem][前端] 標題A" "[Chem][前端] 標題B"
+    # 仍相容具名 + 逗號寫法：vl 34591 -NewTask "A","B"
+    # （PositionalBinding=$false 讓其餘具名參數不吃位置，標題才能全部落到這裡）
+    [Parameter(Position = 1, ValueFromRemainingArguments = $true)]
+    [string[]]$NewTask = @()
 )
 
 Set-StrictMode -Version Latest
