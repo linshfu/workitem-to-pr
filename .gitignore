@@ -8,3 +8,10 @@ env.txt
 
 # Throwaway / scratch scripts
 __*.ps1
+
+# Go TUI build output (shipped as a GitHub Release asset, never committed)
+dist/
+*.exe
+
+# debug logs
+*.log
