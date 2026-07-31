@@ -1,4 +1,4 @@
-﻿# very-lazy installer
+# very-lazy installer
 #
 #   irm https://raw.githubusercontent.com/linshfu/workitem-to-pr/main/install.ps1 | iex
 #
@@ -26,21 +26,7 @@ Write-Host "  very-lazy " -ForegroundColor Cyan -NoNewline
 Write-Host "— Azure DevOps 工作流 CLI" -ForegroundColor Gray
 Write-Host ""
 
-# 1) prerequisites — the tool shells out to git + az at runtime (warn only)
-Step "檢查環境"
-if ($PSVersionTable.PSVersion.Major -lt 5) { Bad "需要 PowerShell 5.1 以上"; return }
-if (Get-Command git -ErrorAction SilentlyContinue) { Ok "git" }
-else { Note "找不到 git，之後請安裝： winget install Git.Git" }
-if (Get-Command az -ErrorAction SilentlyContinue) {
-    Ok "az CLI"
-    $acct = $null
-    try { $acct = az account show --query 'user.name' -o tsv 2>$null } catch {}
-    if ($acct) { Ok "az 已登入（$acct）" } else { Note "az 尚未登入，之後執行： az login" }
-} else {
-    Note "找不到 az CLI，之後請安裝： winget install Microsoft.AzureCLI"
-}
-
-# 2) fetch the binary
+# 1) fetch the binary (environment/az/login are checked on first run, in init)
 Step "安裝主程式到 $InstallDir"
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 $dest = Join-Path $InstallDir $BinaryName
@@ -60,7 +46,7 @@ if ($env:VL_BINARY -and (Test-Path $env:VL_BINARY)) {
 }
 if (-not (Test-Path $dest) -or (Get-Item $dest).Length -eq 0) { Bad "主程式檔案異常，安裝中止"; return }
 
-# 3) choose the command name
+# 2) choose the command name
 Step "設定呼叫名稱"
 $fromEnv = [bool]$env:VL_NAME
 $name = $env:VL_NAME
@@ -89,7 +75,7 @@ if ($existing -and $existing.Source -ne $shim) {
     }
 }
 
-# 4) launcher shim + PATH  (a .cmd works from PowerShell, cmd, and the Run box)
+# 3) launcher shim + PATH  (a .cmd works from PowerShell, cmd, and the Run box)
 "@echo off`r`n`"%~dp0$BinaryName`" %*" | Set-Content -LiteralPath $shim -Encoding ASCII
 if (-not $env:VL_SKIP_PATH) {
     $userPath = [Environment]::GetEnvironmentVariable('Path','User')
@@ -102,9 +88,10 @@ if (-not $env:VL_SKIP_PATH) {
 if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path = "$env:Path;$InstallDir" }
 Ok "指令名稱：$name"
 
-# 5) done
+# 4) done
 Write-Host ""
 Write-Host "  安裝完成。" -ForegroundColor Green
 Write-Host "  開一個新的終端機視窗，輸入 " -NoNewline; Write-Host $name -ForegroundColor Cyan -NoNewline
-Write-Host " 就能開始（第一次會自動帶你做設定）。"
+Write-Host " 就能開始。"
+Write-Host "  第一次會自動檢查環境（git / az / 登入）並帶你做設定。" -ForegroundColor Gray
 Write-Host ""
