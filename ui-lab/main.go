@@ -42,13 +42,15 @@ const (
 	modeInit
 	modeTask
 	modeUpdate
+	modePbi
 )
 
 type taskStep int
 
 const (
 	tkInput     taskStep = iota // enter work item id
-	tkShow                      // show work item + child tasks
+	tkShow                      // show work item + child tasks (multi-select)
+	tkNewTask                   // enter title(s) for new task(s) under the PBI
 	tkBranch                    // resolve project/repo + confirm branch
 	tkPath                      // no local path -> clone or enter existing
 	tkPathInput                 // input the path / clone target dir
@@ -103,6 +105,21 @@ type model struct {
 	upDone    bool
 	upToDate  bool
 
+	// /pbi flow
+	pstep      pbiStep
+	pKeys      []string
+	pCursor    int
+	pMapKey    string
+	pMapping   mappingCfg
+	pAreaPath  string
+	pTitle     string
+	pAreaList  []areaInfo
+	pIterPath  string
+	pIterList  []string
+	pUser      string
+	pCreatedID int
+	pURL       string
+
 	// home palette
 	cmdMatches []command
 	cmdCursor  int
@@ -149,6 +166,12 @@ type model struct {
 	wi         workItem
 	children   []workItem
 	taskCursor int
+
+	// task multi-select + new tasks
+	taskSel    map[int]bool // task id -> selected
+	selOrder   []int        // selection order; [0] = primary (branch naming)
+	newIDs     map[int]bool // which children were newly created (for the label)
+	allTaskIDs []int        // finalized selected ids, carried for the PR to link all
 
 	// branch step
 	selTask      workItem
@@ -309,11 +332,52 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case areasMsg:
 		m.loading = false
+		if m.mode == modePbi {
+			if msg.err != nil {
+				m.errMsg = "取得 Area 失敗:" + msg.err.Error()
+			} else {
+				m.pAreaList, m.pCursor, m.errMsg = msg.areas, 0, ""
+			}
+			return m, nil
+		}
 		if msg.err != nil {
 			m.errMsg = "取得 Area 失敗:" + msg.err.Error()
 		} else {
 			m.areas, m.areaCursor, m.errMsg = msg.areas, 0, ""
 		}
+		return m, nil
+	case whoAmIMsg:
+		if msg.err == nil {
+			m.pUser = msg.name
+		}
+		return m, nil
+	case iterationsMsg:
+		if m.mode != modePbi {
+			return m, nil
+		}
+		m.loading = false
+		target := m.computeIterPath()
+		if msg.err != nil {
+			// can't verify -> use the computed current-month path anyway
+			m.pIterPath, m.pstep = target, pbConfirm
+			return m, nil
+		}
+		m.pIterList = msg.iters
+		if containsStr(msg.iters, target) {
+			m.pIterPath, m.pstep = target, pbConfirm
+			return m, nil
+		}
+		m.pstep, m.pCursor = pbIter, 0
+		m.input.SetValue("")
+		m.input.Placeholder = "篩選 Iteration…"
+		return m, nil
+	case pbiCreatedMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg, m.pstep = msg.err.Error(), pbConfirm
+			return m, nil
+		}
+		m.pCreatedID, m.pURL, m.pstep, m.errMsg = msg.id, msg.url, pbDone, ""
 		return m, nil
 	case workItemMsg:
 		m.loading = false
@@ -324,8 +388,33 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.wi, m.children, m.taskCursor, m.errMsg = msg.wi, msg.children, 0, ""
 		if strings.EqualFold(m.wi.typ, "Task") {
 			// the id is itself a Task -> skip child selection, go straight to branch
+			m.allTaskIDs = []int{m.wi.id}
 			return m.toBranch(m.wi)
 		}
+		return m, nil
+	case taskCreatedMsg:
+		m.loading = false
+		if len(msg.created) == 0 {
+			m.errMsg = "Task 建立失敗"
+			m.tstep = tkShow
+			return m, nil
+		}
+		for _, t := range msg.created {
+			m.children = append(m.children, t)
+			if m.newIDs == nil {
+				m.newIDs = map[int]bool{}
+			}
+			m.newIDs[t.id] = true
+			m.toggleTask(t.id) // auto-select newly created tasks
+		}
+		if len(msg.failed) > 0 {
+			m.errMsg = fmt.Sprintf("部分建立失敗(%d)：%s", len(msg.failed), strings.Join(msg.failed, ", "))
+		} else {
+			m.errMsg = ""
+		}
+		m.tstep = tkShow
+		m.taskCursor = len(m.children) + 1 // land on the "繼續" row
+		m.input.SetValue("")
 		return m, nil
 	case refsMsg:
 		m.loading = false
@@ -422,6 +511,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeUpdate {
 			return m.updateUpdate(msg)
 		}
+		if m.mode == modePbi {
+			return m.updatePbi(msg)
+		}
 		return m.updateHome(msg)
 	}
 	// unhandled (e.g. cursor blink) -> let the text input process it
@@ -495,6 +587,10 @@ func (m model) startTask(idStr string) (tea.Model, tea.Cmd) {
 	m.wi = workItem{}
 	m.children = nil
 	m.taskCursor = 0
+	m.taskSel = map[int]bool{}
+	m.selOrder = nil
+	m.newIDs = map[int]bool{}
+	m.allTaskIDs = nil
 	m.input.SetValue("")
 	m.input.Placeholder = ""
 	return m, fetchWorkItemCmd(m.cfg.AzureOrg, id)
@@ -529,6 +625,9 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 
 	case "/update":
 		return m, m.enterUpdate()
+
+	case "/pbi":
+		return m, m.enterPbi()
 
 	case "/task":
 		if !m.cfgOK {
@@ -990,6 +1089,63 @@ func (m model) afterBranch() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// toggleTask selects/deselects a task, tracking selection order so the first
+// selected becomes the primary (used for branch naming).
+func (m *model) toggleTask(id int) {
+	if m.taskSel == nil {
+		m.taskSel = map[int]bool{}
+	}
+	if m.taskSel[id] {
+		delete(m.taskSel, id)
+		for i, x := range m.selOrder {
+			if x == id {
+				m.selOrder = append(m.selOrder[:i], m.selOrder[i+1:]...)
+				break
+			}
+		}
+		return
+	}
+	m.taskSel[id] = true
+	m.selOrder = append(m.selOrder, id)
+}
+
+func (m model) taskByID(id int) workItem {
+	for _, c := range m.children {
+		if c.id == id {
+			return c
+		}
+	}
+	return workItem{id: id}
+}
+
+func joinTaskIDs(ids []int) string {
+	parts := make([]string, len(ids))
+	for i, id := range ids {
+		parts[i] = "#" + strconv.Itoa(id)
+	}
+	return strings.Join(parts, " ")
+}
+
+// taskRows renders the child tasks (with checkboxes) plus the two action rows.
+func (m model) taskRows() []string {
+	var rows []string
+	for _, c := range m.children {
+		mark := "[ ]"
+		if m.taskSel[c.id] {
+			mark = "[x]"
+		}
+		label := mark + " #" + strconv.Itoa(c.id) + " " + c.title
+		if c.state != "" {
+			label += " (" + c.state + ")"
+		}
+		if m.newIDs[c.id] {
+			label += " ★新"
+		}
+		rows = append(rows, label)
+	}
+	return append(rows, "＋ 建立新 Task", "→ 完成，繼續")
+}
+
 // toBranch resolves the project/repo for a Task and moves to the branch step.
 func (m model) toBranch(t workItem) (tea.Model, tea.Cmd) {
 	key, mp, ok := m.resolveMapping(t)
@@ -1014,6 +1170,13 @@ func (m model) toBranch(t workItem) (tea.Model, tea.Cmd) {
 
 func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "esc" {
+		if m.tstep == tkNewTask && !m.loading {
+			// cancel new-task entry -> back to the selection list, keep selections
+			m.tstep = tkShow
+			m.errMsg = ""
+			m.input.SetValue("")
+			return m, nil
+		}
 		m.mode = modeHome
 		m.loading = false
 		m.errMsg = ""
@@ -1035,22 +1198,61 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.loading {
 			return m, nil
 		}
-		n := len(m.children) + 1 // + "建立新 Task"
+		rows := m.taskRows()
+		n := len(rows)
+		newIdx := len(m.children)   // "＋ 建立新 Task"
+		goIdx := len(m.children) + 1 // "→ 完成，繼續"
 		switch key.String() {
 		case "up":
 			m.taskCursor = (m.taskCursor - 1 + n) % n
 		case "down":
 			m.taskCursor = (m.taskCursor + 1) % n
-		case "enter":
-			if m.taskCursor >= len(m.children) {
-				m.status = "建立新 Task（之後接）"
-				m.mode = modeHome
-				m.input.Placeholder = homePlaceholder
-				return m, nil
+		case " ":
+			if m.taskCursor < len(m.children) {
+				m.toggleTask(m.children[m.taskCursor].id)
 			}
-			return m.toBranch(m.children[m.taskCursor])
+		case "enter":
+			switch {
+			case m.taskCursor < len(m.children):
+				m.toggleTask(m.children[m.taskCursor].id)
+			case m.taskCursor == newIdx:
+				m.tstep = tkNewTask
+				m.errMsg = ""
+				m.input.SetValue("")
+				m.input.Placeholder = "Task 標題（多張用逗號分隔）"
+			case m.taskCursor == goIdx:
+				if len(m.selOrder) == 0 {
+					m.errMsg = "先用 space 選至少一張 Task，或建立新的"
+					return m, nil
+				}
+				m.allTaskIDs = append([]int(nil), m.selOrder...)
+				m.errMsg = ""
+				return m.toBranch(m.taskByID(m.selOrder[0]))
+			}
 		}
 		return m, nil
+
+	case tkNewTask:
+		if m.loading {
+			return m, nil
+		}
+		if key.String() == "enter" {
+			var titles []string
+			for _, p := range strings.Split(m.input.Value(), ",") {
+				if p = strings.TrimSpace(p); p != "" {
+					titles = append(titles, p)
+				}
+			}
+			if len(titles) == 0 {
+				return m, nil
+			}
+			m.loading = true
+			m.errMsg = ""
+			return m, createTasksCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject, m.wi.id, m.wi.area, m.wi.iteration, titles)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
 
 	case tkBranch:
 		if m.loading {
@@ -1303,6 +1505,9 @@ func (m model) View() string {
 	}
 	if m.mode == modeUpdate {
 		return m.viewUpdate()
+	}
+	if m.mode == modePbi {
+		return m.viewPbi()
 	}
 	return m.viewHome()
 }
@@ -1610,16 +1815,24 @@ func (m model) viewTask() string {
 				meta += "   Area " + w.area
 			}
 			body.WriteString(styleFg(muted, meta) + "\n")
-			if w.assigned != "" {
-				body.WriteString(styleFg(muted, "指派 "+w.assigned) + "\n")
+			body.WriteString("\n" + styleFg(muted, "space 選取 Task（可多選）、⏎ 建立新的或繼續：") + "\n\n")
+			body.WriteString(renderList(m.taskRows(), m.taskCursor))
+			if n := len(m.selOrder); n > 0 {
+				body.WriteString("\n\n" + styleFg(okCol, fmt.Sprintf("已選 %d 張，主要 #%d（分支命名）", n, m.selOrder[0])))
 			}
-			body.WriteString("\n" + styleFg(muted, "選一個子 Task 繼續（或建立新的）：") + "\n\n")
-			var items []string
-			for _, c := range m.children {
-				items = append(items, "["+c.typ+"] #"+strconv.Itoa(c.id)+" "+c.title+" ("+c.state+")")
+		}
+
+	case tkNewTask:
+		body.WriteString(styleBold(accent, "建立新 Task") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "建立中…"))
+		} else {
+			body.WriteString(styleFg(muted, "父項 ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n")
+			if m.wi.area != "" {
+				body.WriteString(styleFg(muted, "Area ") + m.wi.area + "\n")
 			}
-			items = append(items, "＋ 建立新 Task")
-			body.WriteString(renderList(items, m.taskCursor))
+			body.WriteString("\n" + styleFg(muted, "輸入標題後 Enter 建立（會自動帶父項的 Area/Iteration、指派給自己）。"))
+			body.WriteString("\n" + styleFg(muted, "一次多張用逗號分隔，例：A,B"))
 		}
 
 	case tkBranch:
@@ -1628,6 +1841,9 @@ func (m model) viewTask() string {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "查詢分支中…"))
 		} else {
 			body.WriteString(styleFg(muted, "Task   ") + "#" + strconv.Itoa(m.selTask.id) + " " + m.selTask.title + "\n")
+			if len(m.allTaskIDs) > 1 {
+				body.WriteString(styleFg(muted, "PR 連結 ") + joinTaskIDs(m.allTaskIDs) + "\n")
+			}
 			body.WriteString(styleFg(muted, "專案   ") + m.mapping.AzureProject + " / " + m.mapping.AzureRepository + "\n")
 			body.WriteString(styleFg(muted, "基底   ") + m.baseBranch + "\n\n")
 			if m.branchReuse != "" {
@@ -1641,12 +1857,15 @@ func (m model) viewTask() string {
 
 	case tkPath:
 		body.WriteString(styleBold(accent, "本機專案路徑") + "\n\n")
-		body.WriteString(styleFg(muted, m.mapping.AzureRepository+" 沒有設定本機路徑，要怎麼取得？") + "\n\n")
+		body.WriteString(styleFg(muted, "專案 ") + m.mapKey + "  " + m.mapping.AzureProject + " / " + m.mapping.AzureRepository + "\n\n")
+		body.WriteString(styleFg(muted, "這個 repo 沒有設定本機路徑，要怎麼取得？") + "\n\n")
 		body.WriteString(renderList([]string{"填現有專案資料夾", "clone 到指定目錄"}, m.pathCursor))
 
 	case tkPathInput:
+		proj := styleFg(muted, "專案 ") + m.mapKey + "  " + m.mapping.AzureProject + " / " + m.mapping.AzureRepository + "\n\n"
 		if m.cloneMode {
 			body.WriteString(styleBold(accent, "clone 專案") + "\n\n")
+			body.WriteString(proj)
 			if m.loading {
 				body.WriteString(m.spin.View() + " " + styleFg(muted, "clone 中…（第一次可能較久）"))
 			} else {
@@ -1654,6 +1873,7 @@ func (m model) viewTask() string {
 			}
 		} else {
 			body.WriteString(styleBold(accent, "現有專案路徑") + "\n\n")
+			body.WriteString(proj)
 			body.WriteString(styleFg(muted, "輸入專案資料夾（要有 .git），Enter 繼續。"))
 		}
 
@@ -1679,7 +1899,7 @@ func (m model) viewTask() string {
 	}
 
 	content := strings.TrimRight(body.String(), "\n")
-	if m.tstep == tkInput || m.tstep == tkPathInput {
+	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask {
 		content = m.input.View() + "\n\n" + content
 	}
 	box := lipgloss.NewStyle().

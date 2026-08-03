@@ -72,13 +72,14 @@ type areasMsg struct {
 }
 
 type workItem struct {
-	id       int
-	title    string
-	typ      string
-	state    string
-	area     string
-	assigned string
-	childIDs []int
+	id        int
+	title     string
+	typ       string
+	state     string
+	area      string
+	iteration string
+	assigned  string
+	childIDs  []int
 }
 
 type workItemMsg struct {
@@ -326,11 +327,12 @@ func normalizeAreaPath(p string) string {
 
 type wiRaw struct {
 	Fields struct {
-		Title    string `json:"System.Title"`
-		Type     string `json:"System.WorkItemType"`
-		State    string `json:"System.State"`
-		Area     string `json:"System.AreaPath"`
-		Assigned struct {
+		Title     string `json:"System.Title"`
+		Type      string `json:"System.WorkItemType"`
+		State     string `json:"System.State"`
+		Area      string `json:"System.AreaPath"`
+		Iteration string `json:"System.IterationPath"`
+		Assigned  struct {
 			DisplayName string `json:"displayName"`
 		} `json:"System.AssignedTo"`
 	} `json:"fields"`
@@ -351,12 +353,13 @@ func showWorkItem(org string, id int) (workItem, error) {
 		return workItem{}, e
 	}
 	wi := workItem{
-		id:       id,
-		title:    raw.Fields.Title,
-		typ:      raw.Fields.Type,
-		state:    raw.Fields.State,
-		area:     raw.Fields.Area,
-		assigned: raw.Fields.Assigned.DisplayName,
+		id:        id,
+		title:     raw.Fields.Title,
+		typ:       raw.Fields.Type,
+		state:     raw.Fields.State,
+		area:      raw.Fields.Area,
+		iteration: raw.Fields.Iteration,
+		assigned:  raw.Fields.Assigned.DisplayName,
 	}
 	for _, rel := range raw.Relations {
 		if rel.Rel == "System.LinkTypes.Hierarchy-Forward" {
@@ -391,6 +394,62 @@ func fetchWorkItemCmd(org string, id int) tea.Cmd {
 			}
 		}
 		return workItemMsg{wi: wi, children: kids}
+	}
+}
+
+type taskCreatedMsg struct {
+	created []workItem
+	failed  []string
+}
+
+// createTasksCmd creates one Task per title under parentID: it inherits the
+// parent's Area/Iteration, is assigned to the current az user, and is linked as
+// a child of the parent (mirrors the PowerShell New-Task). A failed link is
+// non-fatal (the Task still exists); a failed create is collected in `failed`.
+func createTasksCmd(org, project string, parentID int, area, iteration string, titles []string) tea.Cmd {
+	return func() tea.Msg {
+		user, _ := run("az", "account", "show", "--query", "user.name", "-o", "tsv")
+		user = strings.TrimSpace(user)
+
+		var created []workItem
+		var failed []string
+		for _, title := range titles {
+			args := []string{"boards", "work-item", "create",
+				"--type", "Task", "--title", title,
+				"--project", project, "--organization", org, "-o", "json"}
+			if user != "" {
+				args = append(args, "--assigned-to", user)
+			}
+			var fields []string
+			if area != "" {
+				fields = append(fields, "System.AreaPath="+area)
+			}
+			if iteration != "" {
+				fields = append(fields, "System.IterationPath="+iteration)
+			}
+			if len(fields) > 0 {
+				args = append(args, "--fields")
+				args = append(args, fields...)
+			}
+			out, err := run("az", args...)
+			if err != nil {
+				failed = append(failed, title)
+				continue
+			}
+			var raw struct {
+				ID int `json:"id"`
+			}
+			if json.Unmarshal([]byte(out), &raw) != nil || raw.ID == 0 {
+				failed = append(failed, title)
+				continue
+			}
+			// link the new Task as a child of the parent (non-fatal on failure)
+			run("az", "boards", "work-item", "relation", "add",
+				"--id", strconv.Itoa(parentID), "--relation-type", "child",
+				"--target-id", strconv.Itoa(raw.ID), "--organization", org, "-o", "json")
+			created = append(created, workItem{id: raw.ID, title: title, typ: "Task", state: "New"})
+		}
+		return taskCreatedMsg{created: created, failed: failed}
 	}
 }
 
