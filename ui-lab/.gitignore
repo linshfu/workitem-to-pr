@@ -1,0 +1,7 @@
+# build output
+vlui.exe
+*.exe
+
+# generated / debug
+*.log
+config.generated.json

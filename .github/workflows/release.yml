@@ -1,0 +1,43 @@
+name: release
+
+# Push a version tag -> CI builds the Windows binary and publishes a Release.
+#   git tag cli-v0.3.0
+#   git push origin cli-v0.3.0
+# The tag name is injected as the binary's version, so it always matches.
+on:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: write   # needed for the token to create a Release
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ui-lab/go.mod
+
+      - name: Build windows/amd64
+        working-directory: ui-lab
+        env:
+          GOOS: windows
+          GOARCH: amd64
+          CGO_ENABLED: '0'
+        run: >
+          go build -trimpath
+          -ldflags "-s -w -X main.version=${GITHUB_REF_NAME}"
+          -o "${GITHUB_WORKSPACE}/dist/vlui.exe" .
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >
+          gh release create "${GITHUB_REF_NAME}"
+          "${GITHUB_WORKSPACE}/dist/vlui.exe"
+          --title "very-lazy CLI ${GITHUB_REF_NAME}"
+          --notes "自動建置。安裝：irm https://raw.githubusercontent.com/${GITHUB_REPOSITORY}/main/install.ps1 | iex"
