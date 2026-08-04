@@ -1,40 +1,84 @@
 # 📋 Very-Lazy
 
-> **Azure DevOps + Slack 自動化 CLI 工具**
-> 從工作項（Work Item）到建立分支、建立 PR、發送 Slack 通知，一條指令跑完整個日常開發流程。
-> **版本**：v3.8
+> **Azure DevOps + Slack 自動化 CLI（互動式 TUI）**
+> 從工作項到建分支、建 PR、Slack 通知 reviewer，一條指令跑完日常開發流程。
 
-```powershell
-vl 22222        # 處理工作項 22222：選 Task -> 建分支 -> 建 PR -> Slack 通知 reviewer
+打開後輸入 `/` 會模糊搜尋指令、Tab 補全；直接打數字＝處理那張工作項。
+
+```text
+/task 35744   選/建 Task（可多選）→ 建分支 → 建 PR（連結全部）→ Slack 通知 reviewer
+/pbi          建立 PBI（自動帶 Area / 當月 Iteration、指派自己）
+/init         初始化：檢查環境、探索 az、產生 config、可選設定 Slack
+/update       更新到最新版（自我替換）
 ```
 
 ---
 
-## ✨ 功能總覽
+## ⚡ 一行安裝（互動式 CLI）
 
-- **工作項流程自動化**：輸入工作項 ID，自動列出/建立 Task、建立分支、建立 PR、通知 reviewer
-- **PBI/Task 快速建單**：`-NewPbi` 互動式建 PBI、`-NewTask` 一次建多張 Task 並由一張 PR 連結全部
-- **Release 自動化**：一次建立目標 `master` 與 `develop` 的兩張 Release PR
-- **Hotfix 流程**：從 master 開 hotfix 分支、等修正 commit、自動改版號、PR 回 master/develop
-- **Slack 整合**：PR 建立後自動到指定頻道 tag reviewer 請求 review
-- **智慧專案比對**：依 Area Path / 標題標籤自動對應 Azure DevOps 專案與儲存庫，手動選過一次即可記住
+不用 clone、不用手動設定。開 PowerShell 貼上：
+
+```powershell
+irm https://raw.githubusercontent.com/linshfu/workitem-to-pr/main/install.ps1 | iex
+```
+
+會做三件事：**① 檢查環境**（git / az，缺的直接告訴你怎麼裝）→ **② 下載主程式** → **③ 問你要用什麼名字呼叫它**（直接 Enter 用預設 `vl`，也可以打你自己喜歡的，例如 `agy`）。
+
+裝完開一個**新的終端機視窗**，輸入你設定的名字就開始：
+
+```powershell
+vl            # 第一次執行沒有設定檔 -> 自動帶你跑一次 init（選組織/專案，寫好設定）
+vl            # 之後就是首頁，輸入 /task 35015 開始跑工作項流程
+```
+
+設定檔會寫在 `%AppData%\very-lazy\config.json`（跟著使用者走，任何目錄都讀得到）。重跑安裝指令即可升級到最新版。
+
+> **開發 / 尚未發佈 Release 時**：先 `./build.ps1` 產生 `dist\vlui.exe`，再用它安裝：
+> ```powershell
+> $env:VL_BINARY = "$PWD\dist\vlui.exe"; ./install.ps1
+> ```
 
 ---
 
-## 💻 系統需求
+## 🧭 指令
 
-| 需求 | 說明 |
+| 指令 | 說明 |
 |------|------|
-| Windows PowerShell 5.1 或 PowerShell 7+ | 主程式為 PowerShell 腳本 |
-| [Azure CLI](https://learn.microsoft.com/cli/azure/install-azure-cli) | 需安裝 DevOps 擴充：`az extension add --name azure-devops` |
-| Git | 分支操作 |
-| Node.js + npm | 僅 Release / Hotfix 流程需要（`npm ci`、`npm run release`、`npm run build:prod`） |
-| Azure DevOps 帳號 | 對目標專案有建立分支 / PR / 工作項的權限 |
-| Slack Workspace | 需可建立 Slack App（或請管理員代建）；不用 Slack 通知可一律加 `-SkipSlack` |
+| `/task <id>` | 處理工作項：選/建 Task（可多選）→ 建分支 → 建 PR（`--work-items` 連結全部、transition、刪來源分支、必要 reviewer + auto-complete）→ Slack 通知。直接打數字 `35744` 等同 `/task 35744` |
+| `/pbi` | 建立 PBI：選專案 → 標題 → 自動帶 Area、當年當月 Iteration、指派給自己 |
+| `/init` | 初始化精靈：環境檢查、az 探索組織/專案/Area、產生 `config.json`；可選設定 Slack（貼 app manifest → 選/建頻道 → 依團隊 email 自動邀人）。**重跑會進「已有設定」選單**，只改你要改的、不清掉舊設定與本機路徑 |
+| `/update` | 連 GitHub 查最新 Release，有新版就下載並自我替換 |
+| `/help` | 指令說明 |
+| `/release`、`/hotfix` | 規劃中 |
+
+設定檔在 `%AppData%\very-lazy\config.json`；Slack token 在同目錄 `config.local.json`（都不進 git）。
 
 ---
 
-## 🚀 安裝與設定
+## 🔄 更新與發版
+
+- **更新（使用者）**：工具裡打 `/update`，或重跑一行安裝。
+- **發版（維護者）**：推一個 `cli-v*` tag 就好 —— GitHub Actions（`.github/workflows/release.yml`）會在雲端 build `vlui.exe` 並發布 Release，`install.ps1` 一律抓 `releases/latest` 的 `vlui.exe`：
+
+```powershell
+.\release.ps1 0.3.0     # = git tag cli-v0.3.0 + git push origin cli-v0.3.0（觸發 pipeline）
+```
+
+---
+
+## 💻 執行需求
+
+- Windows；執行期需要 `git` 與 `az`（含 `azure-devops` 擴充、已 `az login`）—— 首次跑 `/init` 會幫你檢查，缺的告訴你怎麼裝。
+- Slack 通知為選用（在 `/init` 設定或跳過）。
+
+---
+
+## 🚀 設定細節（PowerShell 版 / 進階）
+
+> **快速開始（推薦）**：clone 之後在專案資料夾執行 `.\main.ps1 -Init`（設好別名後就是 `vl -Init`）。
+> 互動精靈會：檢查環境（git / az / `azure-devops` 擴充，缺的可當場裝）→ `az login` → 用 `az` **列出**你的組織 / 專案 / 儲存庫讓你用選單挑、自動帶出預設分支與 `localPath`，直接寫好 `config.json` →（可選）設定 Slack 頻道並抓成員 →（可選）問你要用什麼別名後寫進 `$PROFILE` → 驗證。
+> 可重複執行（已填的值當預設，只補未設定的）；第一次還沒有 `config.json` 就直接跑 `vl <id>` 時也會問你要不要初始化。
+> 下面的步驟 2–4 就是精靈自動化的內容，保留作為手動 / 進階參考。**Slack Bot 本身（建 App / 加 scope / 邀 bot 進頻道）仍需先照〈Slack Bot 設定教學〉建立一次。**
 
 ### 1. 取得專案
 
@@ -240,6 +284,7 @@ vl -Help                                          # 顯示常用指令與參數
 | 參數 | 說明 | 預設值 |
 |------|------|--------|
 | `-WorkItemId` | 工作項 ID（位置參數，可直接 `vl 22222`） | 自動搜尋指派給自己的工作項 |
+| `-Init` | 初始化精靈：環境檢查 + `az` 探索組織/專案/儲存庫產生 `config.json` + 設定別名 | `false` |
 | `-NewPbi` | 先互動式建立 PBI 再續跑 | `false` |
 | `-NewTask` | 直接以此標題建立新 Task；`"A","B"` 一次建多張 | 空 |
 | `-Hotfix` | Hotfix 流程 | `false` |
@@ -324,7 +369,8 @@ workitem-to-pr/
 │   ├── Git.psm1              # Git / Azure CLI 執行（UTF-8 編碼處理）
 │   ├── AzureDevOps.psm1      # 工作項、分支、PR 操作
 │   ├── Slack.psm1            # Slack 訊息、頻道、成員操作
-│   └── Workflow.psm1         # 核心流程編排（Task/Release/Hotfix/Help）
+│   ├── Workflow.psm1         # 核心流程編排（Task/Release/Hotfix/Help）
+│   └── Init.psm1             # 初始化精靈（-Init：環境檢查 + az 探索 + 產生 config + 別名）
 ├── config.example.json       # config.json 範本（進 git）
 ├── config.local.example.json # config.local.json 範本（進 git）
 └── env.example.txt           # 環境變數範本（進 git）
@@ -338,6 +384,7 @@ workitem-to-pr/
 | `AzureDevOps.psm1` | `Get-Az-WorkItem`、`Start-Task`、`Start-Branch`、`Start-Pr`、`Select-Reviewer`、`Get-Project-And-Repo`、`Start-New-Pbi` |
 | `Slack.psm1` | `Send-Slack-Message`、`Get-Slack-Members`、`Test-Slack-Token-Validity`、`Find-Channel-ID` |
 | `Workflow.psm1` | `Invoke-VeryLazyMain`、`Start-Manual-Release-Process`、`Show-Usage` |
+| `Init.psm1` | `Start-Init`（初始化精靈）、`New-ProjectMapping`、`Register-VlAlias`、`Invoke-AzJson` |
 
 ---
 
@@ -352,6 +399,7 @@ workitem-to-pr/
 
 ## 📝 更新歷史
 
+- **v3.9** (2026-07-28)：新增 `-Init` 初始化精靈（環境檢查 → `az login` → 用 `az` 探索組織/專案/儲存庫互動產生 `config.json` → 選配 Slack 頻道/成員 → 問你要用什麼別名後寫進 `$PROFILE` → 驗證）；第一次無 `config.json` 執行時自動提示初始化；新增 `modules/Init.psm1`（`Start-Init`）
 - **v3.8** (2026-07-06)：`-NewTask` 支援一次建立多張 Task；PR 可同時連結多個工作項（`az repos pr create --work-items`）；修正手動 Release 誤帶 `--work-items 0`
 - **v3.7** (2026-07-02)：新增 `-Hotfix` 流程（master → hotfix 分支 → 等修正 → 自動改版號 → 雙 PR）；`Git.psm1` 新增 `Update-Local-Branch`、`New-Pushed-Branch`
 - **v3.6** (2026-07-02)：新增 `-NewPbi`（自動帶 Area/Iteration/指派自己）；config 新增 `areaPath`、`workItemProject`；Area Path 比對支援 config `areaPath`
