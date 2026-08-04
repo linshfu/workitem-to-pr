@@ -2104,11 +2104,8 @@ func (m model) viewInit() string {
 				}
 				body.WriteString(line + "\n")
 			}
-			body.WriteString("\n")
-			if m.azOK {
-				body.WriteString(styleFg(muted, "按 Enter 繼續 →"))
-			} else {
-				body.WriteString(styleFg(errCol, "az 尚未就緒，先處理上面問題再重跑（esc 返回）"))
+			if !m.azOK {
+				body.WriteString("\n" + styleFg(errCol, "az 尚未就緒，先處理上面問題再重跑"))
 			}
 		}
 
@@ -2117,7 +2114,7 @@ func (m model) viewInit() string {
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "探索組織中…"))
 		} else if m.orgManual {
-			body.WriteString(styleFg(muted, "在上面輸入框貼上組織 URL，Enter 繼續。"))
+			body.WriteString(styleFg(muted, "在上面輸入框貼上組織 URL。"))
 		} else {
 			body.WriteString(styleFg(muted, "選擇組織（打字篩選）：") + "\n\n")
 			body.WriteString(renderList(m.orgItems(), m.orgCursor))
@@ -2153,7 +2150,7 @@ func (m model) viewInit() string {
 
 	case stTag:
 		body.WriteString(styleBold(accent, "標題標籤") + "\n\n")
-		body.WriteString(styleFg(muted, "輸入這個產品在標題裡的標籤（不含中括號），例如 Chem → 對應 [Chem]。Enter 繼續。"))
+		body.WriteString(styleFg(muted, "輸入這個產品在標題裡的標籤（不含中括號），例如 Chem → 對應 [Chem]。"))
 
 	case stCodeProj:
 		body.WriteString(styleBold(accent, "程式碼 / repo 所在的專案") + "\n\n")
@@ -2237,7 +2234,7 @@ func (m model) viewInit() string {
 			body.WriteString(styleFg(accent, "1. ") + styleFg(muted, "Create New App → From a manifest → 選你的 workspace") + "\n")
 			body.WriteString(styleFg(accent, "2. ") + styleFg(muted, "預設 JSON 分頁 → Ctrl+A 全選 → Ctrl+V 貼上 → Next → Create and install → Go to App settings") + "\n")
 			body.WriteString(styleFg(accent, "3. ") + styleFg(muted, "找到 OAuth & Permissions → 複製 Bot User OAuth Token（xoxb-…）") + "\n\n")
-			body.WriteString(styleBold(accent, "貼上 token") + styleFg(muted, "（會遮蔽顯示），Enter 驗證。"))
+			body.WriteString(styleBold(accent, "貼上 token") + styleFg(muted, "（會遮蔽顯示）。"))
 		}
 
 	case stSlackMode:
@@ -2270,7 +2267,7 @@ func (m model) viewInit() string {
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "建頻道、依 email 對 Slack、邀人中…"))
 		} else {
-			body.WriteString(styleFg(muted, "輸入新頻道名稱（小寫、用 - 連字，不含 #），Enter 建立。") + "\n")
+			body.WriteString(styleFg(muted, "輸入新頻道名稱（小寫、用 - 連字，不含 #）。") + "\n")
 			body.WriteString(styleFg(dim, "會自動把 "+strings.Join(m.mappedProjects(), " / ")+" 團隊裡對得到 Slack 的人邀進來。"))
 		}
 
@@ -2293,20 +2290,16 @@ func (m model) viewInit() string {
 		} else if m.slackDone {
 			body.WriteString(styleFg(muted, "Slack    ") + m.slackChannel + fmt.Sprintf("（%d 人）", len(m.slackMembers)) + "\n")
 		}
-		body.WriteString("\n")
 		if m.loading {
-			body.WriteString(m.spin.View() + " " + styleFg(muted, "寫入中…"))
-		} else {
-			body.WriteString(styleFg(muted, "按 Enter 寫入設定"))
+			body.WriteString("\n" + m.spin.View() + " " + styleFg(muted, "寫入中…"))
 		}
 
 	case stDone:
 		body.WriteString(styleBold(okCol, "完成 🎉") + "\n\n")
-		body.WriteString(styleFg(muted, "已寫入：") + "\n" + m.writtenPath + "\n\n")
+		body.WriteString(styleFg(muted, "已寫入：") + "\n" + m.writtenPath)
 		if m.slackSkipped {
-			body.WriteString(styleFg(dim, "（Slack 未設定，之後 /init 可補）") + "\n")
+			body.WriteString("\n\n" + styleFg(dim, "（Slack 未設定，之後 /init 可補）"))
 		}
-		body.WriteString(styleFg(muted, "按 Enter 回首頁"))
 	}
 
 	if m.errMsg != "" {
@@ -2324,7 +2317,38 @@ func (m model) viewInit() string {
 		Padding(0, 2).
 		Render(content)
 
-	return m.banner() + m.initStatus() + "\n" + box + "\n" + m.hintbar("↑↓ 選擇   ⏎ 確認   esc 取消")
+	return m.banner() + m.initStatus() + "\n" + box + "\n" + m.hintbar(m.initHint())
+}
+
+// initHint is the single source of key hints for /init — shown only in the
+// bottom bar, per step, never inside the step box.
+func (m model) initHint() string {
+	if m.loading {
+		return "請稍候…"
+	}
+	switch m.step {
+	case stEnv:
+		if m.azOK {
+			return "⏎ 繼續   esc 取消"
+		}
+		return "esc 取消"
+	case stOrg:
+		if m.orgManual {
+			return "⏎ 確認   esc 取消"
+		}
+		return "↑↓ 選擇   ⏎ 確認   esc 取消"
+	case stTag:
+		return "⏎ 繼續   esc 取消"
+	case stSlackToken:
+		return "⏎ 驗證   esc 取消"
+	case stSlackNew:
+		return "⏎ 建立   esc 取消"
+	case stConfirm:
+		return "⏎ 寫入   esc 取消"
+	case stDone:
+		return "⏎ 回首頁"
+	}
+	return "↑↓ 選擇   ⏎ 確認   esc 取消"
 }
 
 func renderAreaList(items []areaInfo, cursor int) string {

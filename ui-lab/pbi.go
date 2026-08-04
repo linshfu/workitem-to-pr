@@ -391,7 +391,7 @@ func (m model) viewPbi() string {
 		body.WriteString(styleBold(accent, "建立 PBI — 標題") + "\n\n")
 		body.WriteString(styleFg(muted, "專案 ") + m.pMapKey + "\n")
 		body.WriteString(styleFg(muted, "Area ") + m.pAreaPath + "\n\n")
-		body.WriteString(styleFg(muted, "輸入 PBI 標題，Enter 繼續。"))
+		body.WriteString(styleFg(muted, "輸入 PBI 標題。"))
 	case pbResolve:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(m.spin.View() + " " + styleFg(muted, "確認 Iteration…"))
@@ -408,16 +408,14 @@ func (m model) viewPbi() string {
 		body.WriteString(styleFg(muted, "標題      ") + m.pTitle + "\n")
 		body.WriteString(styleFg(muted, "Area      ") + m.pAreaPath + "\n")
 		body.WriteString(styleFg(muted, "Iteration ") + m.pIterPath + "\n")
-		body.WriteString(styleFg(muted, "指派給    ") + who + "\n\n")
-		body.WriteString(styleFg(muted, "按 Enter 建立"))
+		body.WriteString(styleFg(muted, "指派給    ") + who)
 	case pbCreating:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(m.spin.View() + " " + styleFg(muted, "建立中…"))
 	case pbDone:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(styleFg(okCol, fmt.Sprintf("✓ 已建立 PBI #%d", m.pCreatedID)) + "\n")
-		body.WriteString(styleFg(dim, m.pURL) + "\n\n")
-		body.WriteString(styleFg(muted, "按 Enter 返回"))
+		body.WriteString(styleFg(dim, m.pURL))
 	}
 
 	if m.errMsg != "" {

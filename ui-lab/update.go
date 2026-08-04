@@ -171,14 +171,11 @@ func (m model) viewUpdate() string {
 	body.WriteString("\n")
 	switch {
 	case m.upErr != "":
-		body.WriteString(styleFg(errCol, "⚠ "+m.upErr) + "\n\n")
-		body.WriteString(styleFg(muted, "按 Enter 返回"))
+		body.WriteString(styleFg(errCol, "⚠ "+m.upErr))
 	case m.upDone && m.upToDate:
-		body.WriteString(styleFg(okCol, "✓ 已經是最新版") + "\n\n")
-		body.WriteString(styleFg(muted, "按 Enter 返回"))
+		body.WriteString(styleFg(okCol, "✓ 已經是最新版"))
 	case m.upDone:
-		body.WriteString(styleFg(okCol, "✓ 更新完成") + "\n\n")
-		body.WriteString(styleFg(muted, "重開一次就會是新版。按 Enter 返回"))
+		body.WriteString(styleFg(okCol, "✓ 更新完成") + "\n" + styleFg(muted, "重開一次就會是新版。"))
 	default:
 		body.WriteString(m.spin.View() + " " + styleFg(muted, m.upStatus))
 	}
@@ -189,5 +186,9 @@ func (m model) viewUpdate() string {
 		BorderForeground(dim).
 		Padding(0, 2).
 		Render(content)
-	return m.banner() + "\n" + box + "\n" + m.hintbar("⏎ 返回   esc 返回")
+	hint := "⏎ 返回"
+	if !m.upDone && m.upErr == "" {
+		hint = "請稍候…"
+	}
+	return m.banner() + "\n" + box + "\n" + m.hintbar(hint)
 }
