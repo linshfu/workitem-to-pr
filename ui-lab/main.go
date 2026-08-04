@@ -43,6 +43,7 @@ const (
 	modeTask
 	modeUpdate
 	modePbi
+	modeHelp
 )
 
 type taskStep int
@@ -646,6 +647,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modePbi {
 			return m.updatePbi(msg)
 		}
+		if m.mode == modeHelp {
+			switch msg.String() {
+			case "enter", "esc", "q":
+				m.mode = modeHome
+				m.input.Placeholder = homePlaceholder
+			}
+			return m, nil
+		}
 		return m.updateHome(msg)
 	}
 	// unhandled (e.g. cursor blink) -> let the text input process it
@@ -838,6 +847,12 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 	case "/pbi":
 		return m, m.enterPbi()
 
+	case "/help":
+		m.mode = modeHelp
+		m.input.SetValue("")
+		m.input.Placeholder = ""
+		return m, nil
+
 	case "/task":
 		if !m.cfgOK {
 			m.status = "找不到設定，請先跑 /init（或確認 config.json 存在）"
@@ -856,7 +871,7 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 		m.input.Placeholder = "輸入工作項 ID，例如 35015"
 		return m, nil
 	}
-	m.status = name + " 還沒接(目前只做 /init、/task)"
+	m.status = name + " 規劃中，還沒實作"
 	return m, nil
 }
 
@@ -1926,6 +1941,9 @@ func (m model) View() string {
 	if m.mode == modePbi {
 		return m.viewPbi()
 	}
+	if m.mode == modeHelp {
+		return m.viewHelp()
+	}
 	return m.viewHome()
 }
 
@@ -1964,6 +1982,34 @@ func (m model) filterLine() string {
 
 func (m model) hintbar(hint string) string {
 	return "\n " + styleFg(muted, hint) + "\n"
+}
+
+func (m model) viewHelp() string {
+	var b strings.Builder
+	b.WriteString(styleBold(accent, "指令說明") + "\n\n")
+	rows := []struct{ name, desc, note string }{
+		{"/task <id>", "處理工作項：選/建 Task（可多選）→ 建分支 → 建 PR（連結全部）→ Slack 通知 reviewer", "例：/task 35744，或直接打數字 35744"},
+		{"/pbi", "建立 PBI：選專案 → 標題 → 自動帶 Area、當月 Iteration、指派給自己", ""},
+		{"/init", "初始化精靈：檢查環境、az 探索、產生 config，可選設定 Slack", "重跑會進「已有設定」選單，只改你要改的（不清掉舊設定）"},
+		{"/update", "更新到最新版（下載並自我替換）", ""},
+		{"/release", "建立 Release PR", "（規劃中）"},
+		{"/hotfix", "Hotfix 流程", "（規劃中）"},
+		{"/help", "這個畫面", ""},
+	}
+	for _, r := range rows {
+		b.WriteString(styleBold(accent, padRight(r.name, 12)) + styleFg(muted, r.desc) + "\n")
+		if r.note != "" {
+			b.WriteString("            " + styleFg(dim, r.note) + "\n")
+		}
+	}
+	b.WriteString("\n" + styleFg(muted, "小技巧：打 / 模糊搜尋指令、Tab 補全；直接打數字＝/task <id>。"))
+	content := strings.TrimRight(b.String(), "\n")
+	box := lipgloss.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(dim).
+		Padding(0, 2).
+		Render(content)
+	return m.banner() + "\n" + box + "\n" + m.hintbar("⏎ / esc 返回")
 }
 
 func (m model) viewHome() string {
