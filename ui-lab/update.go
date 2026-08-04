@@ -24,7 +24,10 @@ const (
 type updateMsg struct{ latest string }
 
 // updateDoneMsg is the result of running /update (download + self-replace).
-type updateDoneMsg struct{ err error }
+type updateDoneMsg struct {
+	err error
+	exe string // 更新成功後要重啟的執行檔路徑
+}
 
 // checkUpdateCmd asks GitHub for the latest release tag. It runs only when the
 // user invokes /update (no background/startup check). Fail-silent: any error
@@ -91,7 +94,7 @@ func doUpdateCmd() tea.Cmd {
 			os.Rename(oldPath, exe) // rollback
 			return updateDoneMsg{err: err}
 		}
-		return updateDoneMsg{}
+		return updateDoneMsg{exe: exe}
 	}
 }
 
@@ -175,7 +178,7 @@ func (m model) viewUpdate() string {
 	case m.upDone && m.upToDate:
 		body.WriteString(styleFg(okCol, "✓ 已經是最新版"))
 	case m.upDone:
-		body.WriteString(styleFg(okCol, "✓ 更新完成") + "\n" + styleFg(muted, "重開一次就會是新版。"))
+		body.WriteString(styleFg(okCol, "✓ 更新完成") + "\n" + styleFg(muted, "重新啟動中…"))
 	default:
 		body.WriteString(m.spin.View() + " " + styleFg(muted, m.upStatus))
 	}

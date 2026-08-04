@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -49,16 +50,16 @@ const (
 type taskStep int
 
 const (
-	tkInput     taskStep = iota // enter work item id
-	tkShow                      // show work item + child tasks (multi-select)
-	tkNewTask                   // enter title(s) for new task(s) under the PBI
-	tkBranch                    // resolve project/repo + confirm branch
-	tkPath                      // no local path -> clone or enter existing
-	tkPathInput                 // input the path / clone target dir
-	tkCommit                    // wait for commits (PR description)
-	tkReviewer                  // pick a reviewer (or skip)
-	tkPRCreating                // creating PR + reviewer + Slack
-	tkPRDone                    // PR created, show url + Slack status
+	tkInput      taskStep = iota // enter work item id
+	tkShow                       // show work item + child tasks (multi-select)
+	tkNewTask                    // enter title(s) for new task(s) under the PBI
+	tkBranch                     // resolve project/repo + confirm branch
+	tkPath                       // no local path -> clone or enter existing
+	tkPathInput                  // input the path / clone target dir
+	tkCommit                     // wait for commits (PR description)
+	tkReviewer                   // pick a reviewer (or skip)
+	tkPRCreating                 // creating PR + reviewer + Slack
+	tkPRDone                     // PR created, show url + Slack status
 )
 
 type initStep int
@@ -109,11 +110,13 @@ type model struct {
 	boot     tea.Cmd // fired from Init(); first-run drops straight into /init
 
 	// self-update (on-demand, via /update)
-	latestVer string
-	upStatus  string
-	upErr     string
-	upDone    bool
-	upToDate  bool
+	latestVer  string
+	upStatus   string
+	upErr      string
+	upDone     bool
+	upToDate   bool
+	restart    bool   // /update 完成後,結束主程式並以新版重啟
+	restartExe string // 要重啟的執行檔路徑
 
 	// /pbi flow
 	pstep      pbiStep
@@ -604,6 +607,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg = "寫入失敗:" + msg.err.Error()
 		} else {
 			m.writtenPath, m.step, m.errMsg = msg.path, stDone, ""
+			// 剛寫好的設定立刻重載,讓同一個 session 不用重開就能跑 /task、/pbi
+			if cfg, ok := loadConfig(); ok {
+				m.cfg, m.cfgOK = cfg, ok
+			}
 		}
 		return m, nil
 	case updateMsg:
@@ -626,10 +633,13 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		if msg.err != nil {
 			m.upErr = msg.err.Error()
-		} else {
-			m.upDone = true
+			return m, nil
 		}
-		return m, nil
+		// 更新成功:記下新版路徑,結束目前程式,由 main() 以新版重啟接手同一個終端機
+		m.upDone = true
+		m.restart = true
+		m.restartExe = msg.exe
+		return m, tea.Quit
 	case tea.KeyMsg:
 		if msg.String() == "ctrl+c" {
 			m.quitting = true
@@ -682,6 +692,7 @@ func (m model) updateHome(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// autocomplete the highlighted command into the input, ready for args
 		if len(m.cmdMatches) > 0 {
 			m.input.SetValue(m.cmdMatches[m.cmdCursor].name + " ")
+			m.input.CursorEnd()
 			m.refreshMatches()
 		}
 		return m, nil
@@ -1594,7 +1605,7 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		rows := m.taskRows()
 		n := len(rows)
-		newIdx := len(m.children)   // "＋ 建立新 Task"
+		newIdx := len(m.children)    // "＋ 建立新 Task"
 		goIdx := len(m.children) + 1 // "→ 完成，繼續"
 		switch key.String() {
 		case "up":
@@ -2264,7 +2275,7 @@ func (m model) viewInit() string {
 
 	case stSlackAsk:
 		body.WriteString(styleBold(accent, "Slack 通知（可選）") + "\n\n")
-		body.WriteString(styleFg(muted, "建 PR 後自動到頻道 tag reviewer 請 review。要現在設定嗎？") + "\n\n")
+		body.WriteString(styleFg(muted, "設定 Slack Bot 發 PR 通知。要現在設定嗎？") + "\n\n")
 		body.WriteString(renderList([]string{"設定 Slack", "略過（之後再 /init 補）"}, m.slackAskCursor))
 
 	case stSlackToken:
@@ -2277,9 +2288,9 @@ func (m model) viewInit() string {
 			} else {
 				body.WriteString(styleFg(accent, "已開 ") + styleBold(accent, "https://api.slack.com/apps") + "\n\n")
 			}
-			body.WriteString(styleFg(accent, "1. ") + styleFg(muted, "Create New App → From a manifest → 選你的 workspace") + "\n")
-			body.WriteString(styleFg(accent, "2. ") + styleFg(muted, "預設 JSON 分頁 → Ctrl+A 全選 → Ctrl+V 貼上 → Next → Create and install → Go to App settings") + "\n")
-			body.WriteString(styleFg(accent, "3. ") + styleFg(muted, "找到 OAuth & Permissions → 複製 Bot User OAuth Token（xoxb-…）") + "\n\n")
+			body.WriteString(styleFg(accent, "1. ") + styleFg(muted, "Create New App → From a manifest → 預設 JSON 分頁 → Ctrl+A 全選 → Ctrl+V 貼上 → 選你的 workspace → Next") + "\n")
+			body.WriteString(styleFg(accent, "2. ") + styleFg(muted, "Create and install → Go to App settings → 找到 OAuth & Permissions → Reinstall") + "\n")
+			body.WriteString(styleFg(accent, "3. ") + styleFg(muted, "複製 Bot User OAuth Token（xoxb-…）") + "\n\n")
 			body.WriteString(styleBold(accent, "貼上 token") + styleFg(muted, "（會遮蔽顯示）。"))
 		}
 
@@ -2597,8 +2608,15 @@ func (m model) taskHint() string {
 }
 
 func main() {
-	if _, err := tea.NewProgram(initialModel()).Run(); err != nil {
+	fm, err := tea.NewProgram(initialModel()).Run()
+	if err != nil {
 		fmt.Println("error:", err)
 		os.Exit(1)
+	}
+	// /update 完成後,以新版執行檔重啟,接手同一個終端機
+	if mm, ok := fm.(model); ok && mm.restart && mm.restartExe != "" {
+		c := exec.Command(mm.restartExe)
+		c.Stdin, c.Stdout, c.Stderr = os.Stdin, os.Stdout, os.Stderr
+		_ = c.Run()
 	}
 }
