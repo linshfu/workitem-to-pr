@@ -55,6 +55,9 @@ const (
 	tkPath                      // no local path -> clone or enter existing
 	tkPathInput                 // input the path / clone target dir
 	tkCommit                    // wait for commits (PR description)
+	tkReviewer                  // pick a reviewer (or skip)
+	tkPRCreating                // creating PR + reviewer + Slack
+	tkPRDone                    // PR created, show url + Slack status
 )
 
 type initStep int
@@ -69,6 +72,12 @@ const (
 	stCodeProj
 	stCodeRepo
 	stMore
+	stReuse // menu shown when re-running init over an existing config
+	stSlackAsk
+	stSlackToken
+	stSlackMode // pick existing channel vs create a new one
+	stSlackPick // pick an existing channel
+	stSlackNew  // enter a new channel name
 	stConfirm
 	stDone
 )
@@ -159,6 +168,23 @@ type model struct {
 	writtenPath string
 	errMsg      string
 
+	// slack setup (in /init)
+	slackAskCursor  int
+	slackModeCursor int
+	slackToken      string
+	slackChannel    string
+	slackChannels   []slackChannel
+	slackChanCursor int
+	slackMembers    []slackMember
+	slackDone       bool
+	slackSkipped    bool
+	manifestCopied  bool
+
+	// re-running /init over an existing config
+	reconfig      bool // an existing config was loaded
+	returnToReuse bool // a sub-step was entered from the reuse menu; return to it
+	reuseCursor   int
+
 	// config + task flow
 	cfg        config
 	cfgOK      bool
@@ -188,6 +214,16 @@ type model struct {
 	pathCursor  int
 	commits     string
 	commitCount int // -1 = branch not pushed, 0 = no new commits, >0 = commits
+
+	// PR + reviewer + Slack
+	reviewers []reviewer
+	revCursor int
+	chosenRev reviewer
+	prID      int
+	prURL     string
+	prResult  string
+	revNote   string
+	slackMsg  string
 }
 
 func initialModel() model {
@@ -274,6 +310,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.envResults = msg.results
 		m.azOK = msg.azOK
 		if msg.azOK && allOK(msg.results) {
+			if m.reconfig {
+				// existing config -> reuse menu instead of a forced full redo
+				m.step = stReuse
+				m.reuseCursor = 0
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+				return m, nil
+			}
 			// no problems -> skip the Enter, go straight to org discovery
 			m.step = stOrg
 			m.loading = true
@@ -351,6 +395,46 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.pUser = msg.name
 		}
 		return m, nil
+	case slackAuthMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "Slack token 無效:" + msg.err.Error()
+			return m, nil
+		}
+		m.errMsg = ""
+		m.step = stSlackMode
+		m.slackModeCursor = 0
+		m.input.EchoMode = textinput.EchoNormal
+		m.input.SetValue("")
+		m.input.Placeholder = ""
+		return m, nil
+	case channelsMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "取得頻道失敗:" + msg.err.Error()
+			return m, nil
+		}
+		m.slackChannels, m.slackChanCursor, m.errMsg = msg.channels, 0, ""
+		return m, nil
+	case manifestMsg:
+		m.manifestCopied = msg.ok
+		return m, nil
+	case slackMembersMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "抓頻道成員失敗:" + msg.err.Error()
+			return m, nil
+		}
+		m.slackMembers, m.slackDone, m.slackSkipped, m.errMsg = msg.members, true, false, ""
+		if m.returnToReuse {
+			m.returnToReuse = false
+			m.step = stReuse
+		} else {
+			m.step = stConfirm
+		}
+		m.input.SetValue("")
+		m.input.Placeholder = ""
+		return m, nil
 	case iterationsMsg:
 		if m.mode != modePbi {
 			return m, nil
@@ -415,6 +499,54 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tstep = tkShow
 		m.taskCursor = len(m.children) + 1 // land on the "繼續" row
 		m.input.SetValue("")
+		return m, nil
+	case reviewersMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "取得 reviewer 失敗:" + msg.err.Error()
+			m.reviewers = nil
+			return m, nil
+		}
+		m.reviewers, m.revCursor, m.errMsg = msg.list, 0, ""
+		return m, nil
+	case prCreatedMsg:
+		if msg.err != nil {
+			m.loading = false
+			m.errMsg = "建立 PR 失敗:" + msg.err.Error()
+			m.tstep = tkReviewer // let them pick again / retry
+			return m, nil
+		}
+		m.prID, m.prURL, m.errMsg = msg.id, msg.url, ""
+		m.prResult = prResultText(m.mapping.AzureProject, m.baseBranch, msg.url, msg.title, msg.id)
+		switch {
+		case msg.reviewerErr != "":
+			m.revNote = "reviewer 未加成功:" + msg.reviewerErr
+		case m.chosenRev.email != "":
+			m.revNote = "必要 reviewer:" + reviewerLabel(m.chosenRev) + "（已設 auto-complete）"
+		default:
+			m.revNote = "未加 reviewer"
+		}
+		if m.slackConfigured() && m.chosenRev.slackID != "" {
+			m.slackMsg = "通知 Slack 中…"
+			return m, tea.Batch(openURLCmd(m.prURL),
+				slackNotifyCmd(m.cfg.SlackToken, m.cfg.Slack.Channel, m.chosenRev.slackID, m.prResult))
+		}
+		m.loading = false
+		if !m.slackConfigured() {
+			m.slackMsg = "Slack 未設定，略過通知"
+		} else {
+			m.slackMsg = "reviewer 無 Slack 對應，略過通知"
+		}
+		m.tstep = tkPRDone
+		return m, openURLCmd(m.prURL)
+	case slackDoneMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.slackMsg = "Slack 通知失敗:" + msg.err.Error()
+		} else {
+			m.slackMsg = "已通知 Slack #" + m.cfg.Slack.Channel
+		}
+		m.tstep = tkPRDone
 		return m, nil
 	case refsMsg:
 		m.loading = false
@@ -591,6 +723,8 @@ func (m model) startTask(idStr string) (tea.Model, tea.Cmd) {
 	m.selOrder = nil
 	m.newIDs = map[int]bool{}
 	m.allTaskIDs = nil
+	m.reviewers, m.revCursor, m.chosenRev = nil, 0, reviewer{}
+	m.prID, m.prURL, m.prResult, m.revNote, m.slackMsg = 0, "", "", "", ""
 	m.input.SetValue("")
 	m.input.Placeholder = ""
 	return m, fetchWorkItemCmd(m.cfg.AzureOrg, id)
@@ -613,9 +747,84 @@ func (m *model) enterInit() tea.Cmd {
 	m.mappings = nil
 	m.curArea, m.curAlias, m.curKey = areaInfo{}, "", ""
 	m.project = ""
+	m.slackAskCursor, m.slackToken, m.slackChannel = 0, "", ""
+	m.slackMembers, m.slackDone, m.slackSkipped = nil, false, false
+	m.reconfig, m.returnToReuse, m.reuseCursor = false, false, 0
+	// re-running over an existing config: pre-load it so nothing is lost and the
+	// user only changes what they want (a reuse menu, not a forced full redo).
+	if m.cfgOK {
+		m.reconfig = true
+		m.org = m.cfg.AzureOrg
+		m.wip = m.cfg.WorkItemProject
+		m.mappings = existingMappingsAsEntries(m.cfg)
+		m.identMode = inferIdentMode(m.mappings)
+		m.slackChannel = m.cfg.Slack.Channel
+		m.slackMembers = m.cfg.Slack.Members
+		m.slackToken = m.cfg.SlackToken
+		m.slackDone = m.cfg.Slack.Channel != ""
+	}
 	m.input.SetValue("")
+	m.input.EchoMode = textinput.EchoNormal
 	m.input.Placeholder = "環境檢查中…"
 	return checkEnvCmd()
+}
+
+func existingMappingsAsEntries(c config) []mappingEntry {
+	var out []mappingEntry
+	for _, k := range sortedMappingKeys(c.Mappings) {
+		mp := c.Mappings[k]
+		alias := ""
+		if len(mp.Aliases) > 0 {
+			alias = mp.Aliases[0]
+		}
+		out = append(out, mappingEntry{
+			key: k, project: mp.AzureProject, repo: mp.AzureRepository,
+			branch: mp.DefaultBranch, areaPath: mp.AreaPath, alias: alias,
+		})
+	}
+	return out
+}
+
+func (m model) visibleChannels() []slackChannel {
+	q := strings.TrimSpace(m.input.Value())
+	if q == "" {
+		return m.slackChannels
+	}
+	var out []slackChannel
+	for _, c := range m.slackChannels {
+		if fuzzyMatch(q, c.name) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// mappedProjects is the unique Azure code projects from the mappings — the teams
+// to seed a new Slack channel from.
+func (m model) mappedProjects() []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, e := range m.mappings {
+		if e.project != "" && !seen[e.project] {
+			seen[e.project] = true
+			out = append(out, e.project)
+		}
+	}
+	return out
+}
+
+func inferIdentMode(entries []mappingEntry) identMode {
+	for _, e := range entries {
+		if e.areaPath != "" {
+			return identArea
+		}
+	}
+	for _, e := range entries {
+		if e.alias != "" {
+			return identTag
+		}
+	}
+	return identArea
 }
 
 func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
@@ -657,6 +866,7 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.errMsg = ""
 		m.input.SetValue("")
+		m.input.EchoMode = textinput.EchoNormal
 		m.input.Placeholder = homePlaceholder
 		return m, nil
 	}
@@ -664,6 +874,13 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.step {
 	case stEnv:
 		if key.String() == "enter" && !m.loading && m.azOK {
+			if m.reconfig {
+				m.step = stReuse
+				m.reuseCursor = 0
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+				return m, nil
+			}
 			m.step = stOrg
 			m.loading = true
 			m.orgManual = false
@@ -671,6 +888,38 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 			m.input.Placeholder = "篩選組織…"
 			return m, listOrgsCmd()
+		}
+		return m, nil
+
+	case stReuse:
+		rows := 4 // wip / mappings / slack / done
+		switch key.String() {
+		case "up":
+			m.reuseCursor = (m.reuseCursor - 1 + rows) % rows
+		case "down":
+			m.reuseCursor = (m.reuseCursor + 1) % rows
+		case "enter":
+			switch m.reuseCursor {
+			case 0: // 工作項專案
+				m.returnToReuse = true
+				return m, m.gotoWIP()
+			case 1: // 專案對應
+				m.returnToReuse = true
+				m.step = stMore
+				m.moreCursor = 0
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+			case 2: // Slack
+				m.returnToReuse = true
+				m.step = stSlackAsk
+				m.slackAskCursor = 0
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+			case 3: // 完成，寫入
+				m.step = stConfirm
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+			}
 		}
 		return m, nil
 
@@ -762,6 +1011,13 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "enter":
 			if len(vis) > 0 {
 				m.wip = vis[m.projCursor]
+				if m.returnToReuse {
+					m.returnToReuse = false
+					m.step = stReuse
+					m.input.SetValue("")
+					m.input.Placeholder = ""
+					return m, nil
+				}
 				if m.identMode == identArea {
 					cmd := m.gotoCodeProj("")
 					return m, cmd
@@ -913,17 +1169,140 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				cmd := m.gotoCodeProj("")
 				return m, cmd
 			}
-			m.step = stConfirm
+			if m.returnToReuse {
+				m.returnToReuse = false
+				m.step = stReuse
+			} else {
+				m.step = stSlackAsk
+				m.slackAskCursor = 0
+			}
 			m.input.SetValue("")
 			m.input.Placeholder = ""
 		}
 		return m, nil
 
+	case stSlackAsk:
+		switch key.String() {
+		case "up", "down":
+			m.slackAskCursor = (m.slackAskCursor + 1) % 2
+		case "enter":
+			if m.slackAskCursor == 0 { // 設定 Slack
+				m.step = stSlackToken
+				m.errMsg = ""
+				m.input.SetValue("")
+				m.input.EchoMode = textinput.EchoPassword
+				m.input.Placeholder = "貼上 Slack Bot Token (xoxb-…)"
+				m.manifestCopied = false
+				// open the create page + copy the manifest to the clipboard
+				return m, tea.Batch(openURLCmd("https://api.slack.com/apps"), copyManifestCmd())
+			}
+			{ // 略過
+				m.slackSkipped, m.slackDone = true, true
+				if m.returnToReuse {
+					m.returnToReuse = false
+					m.step = stReuse
+				} else {
+					m.step = stConfirm
+				}
+				m.input.SetValue("")
+				m.input.Placeholder = ""
+			}
+		}
+		return m, nil
+
+	case stSlackToken:
+		if m.loading {
+			return m, nil
+		}
+		if key.String() == "enter" {
+			tok := strings.TrimSpace(m.input.Value())
+			if tok == "" {
+				return m, nil
+			}
+			m.slackToken = tok
+			m.loading = true
+			m.errMsg = ""
+			return m, validateSlackTokenCmd(tok)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
+
+	case stSlackMode:
+		switch key.String() {
+		case "up", "down":
+			m.slackModeCursor = (m.slackModeCursor + 1) % 2
+		case "enter":
+			if m.slackModeCursor == 0 { // 用現有頻道
+				m.step = stSlackPick
+				m.loading = true
+				m.slackChanCursor = 0
+				m.input.SetValue("")
+				m.input.Placeholder = "篩選頻道…"
+				return m, listChannelsCmd(m.slackToken)
+			}
+			m.step = stSlackNew // 建立新頻道
+			m.input.SetValue("")
+			m.input.Placeholder = "新頻道名稱（小寫、用 - 連字，例：pr-review）"
+		}
+		return m, nil
+
+	case stSlackPick:
+		if m.loading {
+			return m, nil
+		}
+		vis := m.visibleChannels()
+		switch key.String() {
+		case "up":
+			if n := len(vis); n > 0 {
+				m.slackChanCursor = (m.slackChanCursor - 1 + n) % n
+			}
+			return m, nil
+		case "down":
+			if n := len(vis); n > 0 {
+				m.slackChanCursor = (m.slackChanCursor + 1) % n
+			}
+			return m, nil
+		case "enter":
+			if len(vis) == 0 {
+				return m, nil
+			}
+			ch := vis[m.slackChanCursor]
+			m.slackChannel = ch.name
+			m.loading = true
+			m.errMsg = ""
+			return m, channelMembersCmd(m.slackToken, ch.id)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		if n := len(m.visibleChannels()); n == 0 || m.slackChanCursor >= n {
+			m.slackChanCursor = 0
+		}
+		return m, cmd
+
+	case stSlackNew:
+		if m.loading {
+			return m, nil
+		}
+		if key.String() == "enter" {
+			name := strings.TrimSpace(m.input.Value())
+			if name == "" {
+				return m, nil
+			}
+			m.slackChannel = name
+			m.loading = true
+			m.errMsg = ""
+			return m, createChannelWithTeamCmd(m.slackToken, m.cfg.AzureOrg, name, m.mappedProjects())
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
+
 	case stConfirm:
 		if key.String() == "enter" {
 			m.loading = true
 			m.errMsg = ""
-			return m, writeConfigCmd(m.org, m.wip, m.mappings)
+			return m, writeConfigCmd(m.org, m.wip, m.mappings, m.slackChannel, m.slackMembers, m.slackToken)
 		}
 		return m, nil
 
@@ -1327,15 +1706,53 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		if key.String() == "enter" {
 			if m.commitCount > 0 {
-				m.status = fmt.Sprintf("找到 %d 個 commit → 下一步建 PR（之後接）", m.commitCount)
-				m.mode = modeHome
-				m.input.SetValue("")
-				m.input.Placeholder = homePlaceholder
-				return m, nil
+				// commits ready -> pick a reviewer, then build the PR
+				m.tstep = tkReviewer
+				m.loading = true
+				m.errMsg = ""
+				m.revCursor = 0
+				return m, listReviewersCmd(m.cfg.AzureOrg, m.mapping.AzureProject, m.cfg.Slack.Members)
 			}
 			m.loading = true
 			m.errMsg = ""
 			return m, commitCheckCmd(m.localPath, m.baseBranch, m.branchName)
+		}
+		return m, nil
+
+	case tkReviewer:
+		if m.loading {
+			return m, nil
+		}
+		n := len(m.reviewers) + 1 // + "略過"
+		switch key.String() {
+		case "up":
+			m.revCursor = (m.revCursor - 1 + n) % n
+		case "down":
+			m.revCursor = (m.revCursor + 1) % n
+		case "enter":
+			if m.revCursor < len(m.reviewers) {
+				m.chosenRev = m.reviewers[m.revCursor]
+			} else {
+				m.chosenRev = reviewer{} // skip
+			}
+			m.tstep = tkPRCreating
+			m.loading = true
+			m.errMsg = ""
+			title := m.branchName
+			return m, createPRCmd(m.cfg.AzureOrg, m.mapping.AzureProject, m.mapping.AzureRepository,
+				m.branchName, m.baseBranch, title, m.commits, m.allTaskIDs, m.chosenRev)
+		}
+		return m, nil
+
+	case tkPRCreating:
+		return m, nil // wait for the async result
+
+	case tkPRDone:
+		if key.String() == "enter" {
+			m.mode = modeHome
+			m.input.SetValue("")
+			m.input.Placeholder = homePlaceholder
+			return m, nil
 		}
 		return m, nil
 	}
@@ -1530,7 +1947,7 @@ func (m model) commandBar() string {
 // (as a list filter or a value entry). Those steps render the input inside the box.
 func (m model) stepUsesInput() bool {
 	switch m.step {
-	case stOrg, stWIP, stArea, stCodeProj, stCodeRepo, stTag:
+	case stOrg, stWIP, stArea, stCodeProj, stCodeRepo, stTag, stSlackToken, stSlackPick, stSlackNew:
 		return true
 	}
 	return false
@@ -1538,8 +1955,9 @@ func (m model) stepUsesInput() bool {
 
 func (m model) filterLine() string {
 	label := "篩選 "
-	if m.step == stTag || (m.step == stOrg && m.orgManual) {
-		label = "" // these are value entry, not a filter
+	switch {
+	case m.step == stTag, m.step == stSlackToken, m.step == stSlackNew, m.step == stOrg && m.orgManual:
+		label = "" // value entry, not a filter
 	}
 	return styleFg(muted, label) + m.input.View()
 }
@@ -1634,6 +2052,38 @@ func renderRepoList(items []repoInfo, cursor int) string {
 	})
 }
 
+// initStatus is the at-a-glance checklist shown under the banner during /init,
+// so you can see which steps are already done/verified.
+func (m model) initStatus() string {
+	var lines []string
+	add := func(label, val string) {
+		lines = append(lines, " "+styleFg(okCol, "✓")+" "+styleFg(muted, label)+" "+val)
+	}
+	if len(m.envResults) > 0 && m.azOK {
+		add("環境", styleFg(dim, "git / az / 擴充 / 登入"))
+	}
+	if m.org != "" {
+		add("組織", m.org)
+	}
+	if m.wip != "" {
+		add("工作項專案", m.wip)
+	}
+	if len(m.mappings) > 0 {
+		add("專案對應", fmt.Sprintf("%d 個", len(m.mappings)))
+	}
+	if m.slackDone {
+		if m.slackSkipped {
+			add("Slack", styleFg(dim, "略過"))
+		} else {
+			add("Slack", m.slackChannel+fmt.Sprintf("（%d 人）", len(m.slackMembers)))
+		}
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n") + "\n"
+}
+
 func (m model) viewInit() string {
 	var body strings.Builder
 
@@ -1678,7 +2128,9 @@ func (m model) viewInit() string {
 		body.WriteString(renderList(modeLabels, m.modeCursor))
 
 	case stWIP:
-		body.WriteString(styleBold(accent, "工單所在專案 (workItemProject)") + "\n\n")
+		body.WriteString(styleBold(accent, "工作項所在的專案") + "\n\n")
+		body.WriteString(styleFg(muted, "你的 Task / PBI 開在哪個 Azure DevOps 專案（Area、Iteration 的根）。") + "\n")
+		body.WriteString(styleFg(dim, "通常整個團隊共用一個，例：ESHClouds。") + "\n\n")
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "探索專案中…"))
 		} else if vis := m.visibleProjects(); len(vis) == 0 {
@@ -1704,10 +2156,12 @@ func (m model) viewInit() string {
 		body.WriteString(styleFg(muted, "輸入這個產品在標題裡的標籤（不含中括號），例如 Chem → 對應 [Chem]。Enter 繼續。"))
 
 	case stCodeProj:
-		body.WriteString(styleBold(accent, "code 專案") + "\n\n")
+		body.WriteString(styleBold(accent, "程式碼 / repo 所在的專案") + "\n\n")
+		body.WriteString(styleFg(muted, "這個產品的 code 放在哪個 Azure 專案 —— 就是你要開分支、建 PR 的地方。") + "\n")
+		body.WriteString(styleFg(dim, "跟上面「工作項專案」可能不同；一個產品一個，例：Chem。") + "\n\n")
 		if m.curAlias != "" {
-			body.WriteString(styleFg(muted, "為 ") + styleFg(accent, m.curAlias) +
-				styleFg(muted, " 選擇 code 所在的 Azure 專案：") + "\n\n")
+			body.WriteString(styleFg(muted, "正在為 ") + styleFg(accent, m.curAlias) +
+				styleFg(muted, " 設定：") + "\n\n")
 		}
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "探索專案中…"))
@@ -1737,7 +2191,88 @@ func (m model) viewInit() string {
 			body.WriteString("\n")
 		}
 		body.WriteString("\n")
-		body.WriteString(renderList([]string{"再加一個對應", "完成，寫入設定"}, m.moreCursor))
+		moreDone := "完成，寫入設定"
+		if m.returnToReuse {
+			moreDone = "完成，回選單"
+		}
+		body.WriteString(renderList([]string{"再加一個對應", moreDone}, m.moreCursor))
+
+	case stReuse:
+		body.WriteString(styleBold(accent, "已有設定 — 要改哪個？") + "\n\n")
+		body.WriteString(styleFg(muted, "選要重設的項目，其它沿用（本機路徑等不會被清掉）。") + "\n\n")
+		wip := m.wip
+		if wip == "" {
+			wip = "（未設定）"
+		}
+		slack := "未設定"
+		if m.slackDone {
+			if m.slackChannel != "" {
+				slack = m.slackChannel + fmt.Sprintf("（%d 人）", len(m.slackMembers))
+			} else {
+				slack = "略過"
+			}
+		}
+		body.WriteString(renderList([]string{
+			"工作項專案：" + wip,
+			fmt.Sprintf("專案對應：%d 個（檢視 / 新增）", len(m.mappings)),
+			"Slack：" + slack,
+			"✓ 完成，寫入設定",
+		}, m.reuseCursor))
+
+	case stSlackAsk:
+		body.WriteString(styleBold(accent, "Slack 通知（可選）") + "\n\n")
+		body.WriteString(styleFg(muted, "建 PR 後自動到頻道 tag reviewer 請 review。要現在設定嗎？") + "\n\n")
+		body.WriteString(renderList([]string{"設定 Slack", "略過（之後再 /init 補）"}, m.slackAskCursor))
+
+	case stSlackToken:
+		body.WriteString(styleBold(accent, "Slack Bot Token") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "驗證 token…"))
+		} else {
+			if m.manifestCopied {
+				body.WriteString(styleBold(okCol, "✓ manifest(JSON)已複製到剪貼簿") + "  " + styleFg(muted, "已開 api.slack.com/apps") + "\n\n")
+			} else {
+				body.WriteString(styleFg(accent, "已開 ") + styleBold(accent, "https://api.slack.com/apps") + "\n\n")
+			}
+			body.WriteString(styleFg(accent, "1. ") + styleFg(muted, "Create New App → From a manifest → 選你的 workspace") + "\n")
+			body.WriteString(styleFg(accent, "2. ") + styleFg(muted, "預設 JSON 分頁 → Ctrl+A 全選 → Ctrl+V 貼上 → Next → Create and install → Go to App settings") + "\n")
+			body.WriteString(styleFg(accent, "3. ") + styleFg(muted, "找到 OAuth & Permissions → 複製 Bot User OAuth Token（xoxb-…）") + "\n\n")
+			body.WriteString(styleBold(accent, "貼上 token") + styleFg(muted, "（會遮蔽顯示），Enter 驗證。"))
+		}
+
+	case stSlackMode:
+		body.WriteString(styleBold(accent, "審核頻道") + "\n\n")
+		body.WriteString(styleFg(okCol, "✓ token 有效") + "\n\n")
+		body.WriteString(renderList([]string{"用現有頻道（挑一個，bot 自動加入）", "建立新頻道（依你的專案團隊自動邀人）"}, m.slackModeCursor))
+
+	case stSlackPick:
+		body.WriteString(styleBold(accent, "選審核頻道") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "讀取頻道…（選完會自動加入並抓成員）"))
+		} else {
+			var items []string
+			for _, c := range m.visibleChannels() {
+				mark := "# "
+				if c.private {
+					mark = "🔒 "
+				}
+				items = append(items, mark+c.name)
+			}
+			if len(items) == 0 {
+				body.WriteString(styleFg(muted, "沒有符合的頻道"))
+			} else {
+				body.WriteString(renderList(items, m.slackChanCursor))
+			}
+		}
+
+	case stSlackNew:
+		body.WriteString(styleBold(accent, "建立新頻道") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "建頻道、依 email 對 Slack、邀人中…"))
+		} else {
+			body.WriteString(styleFg(muted, "輸入新頻道名稱（小寫、用 - 連字，不含 #），Enter 建立。") + "\n")
+			body.WriteString(styleFg(dim, "會自動把 "+strings.Join(m.mappedProjects(), " / ")+" 團隊裡對得到 Slack 的人邀進來。"))
+		}
 
 	case stConfirm:
 		body.WriteString(styleBold(accent, "確認並寫入") + "\n\n")
@@ -1753,17 +2288,24 @@ func (m model) viewInit() string {
 				body.WriteString(styleFg(dim, "     tag : ["+e.alias+"]") + "\n")
 			}
 		}
+		if m.slackSkipped {
+			body.WriteString(styleFg(muted, "Slack    ") + styleFg(dim, "略過") + "\n")
+		} else if m.slackDone {
+			body.WriteString(styleFg(muted, "Slack    ") + m.slackChannel + fmt.Sprintf("（%d 人）", len(m.slackMembers)) + "\n")
+		}
 		body.WriteString("\n")
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "寫入中…"))
 		} else {
-			body.WriteString(styleFg(muted, "按 Enter 寫入 config.generated.json"))
+			body.WriteString(styleFg(muted, "按 Enter 寫入設定"))
 		}
 
 	case stDone:
 		body.WriteString(styleBold(okCol, "完成 🎉") + "\n\n")
 		body.WriteString(styleFg(muted, "已寫入：") + "\n" + m.writtenPath + "\n\n")
-		body.WriteString(styleFg(dim, "（Slack / 別名 / localPath 之後再補）") + "\n")
+		if m.slackSkipped {
+			body.WriteString(styleFg(dim, "（Slack 未設定，之後 /init 可補）") + "\n")
+		}
 		body.WriteString(styleFg(muted, "按 Enter 回首頁"))
 	}
 
@@ -1782,7 +2324,7 @@ func (m model) viewInit() string {
 		Padding(0, 2).
 		Render(content)
 
-	return m.banner() + "\n" + box + "\n" + m.hintbar("↑↓ 選擇   ⏎ 確認   esc 取消")
+	return m.banner() + m.initStatus() + "\n" + box + "\n" + m.hintbar("↑↓ 選擇   ⏎ 確認   esc 取消")
 }
 
 func renderAreaList(items []areaInfo, cursor int) string {
@@ -1801,7 +2343,7 @@ func (m model) viewTask() string {
 	switch m.tstep {
 	case tkInput:
 		body.WriteString(styleBold(accent, "處理工作項") + "\n\n")
-		body.WriteString(styleFg(muted, "輸入工作項 ID，Enter 讀取。"))
+		body.WriteString(styleFg(muted, "輸入工作項 ID。"))
 
 	case tkShow:
 		if m.loading {
@@ -1814,8 +2356,7 @@ func (m model) viewTask() string {
 			if w.area != "" {
 				meta += "   Area " + w.area
 			}
-			body.WriteString(styleFg(muted, meta) + "\n")
-			body.WriteString("\n" + styleFg(muted, "space 選取 Task（可多選）、⏎ 建立新的或繼續：") + "\n\n")
+			body.WriteString(styleFg(muted, meta) + "\n\n")
 			body.WriteString(renderList(m.taskRows(), m.taskCursor))
 			if n := len(m.selOrder); n > 0 {
 				body.WriteString("\n\n" + styleFg(okCol, fmt.Sprintf("已選 %d 張，主要 #%d（分支命名）", n, m.selOrder[0])))
@@ -1831,7 +2372,7 @@ func (m model) viewTask() string {
 			if m.wi.area != "" {
 				body.WriteString(styleFg(muted, "Area ") + m.wi.area + "\n")
 			}
-			body.WriteString("\n" + styleFg(muted, "輸入標題後 Enter 建立（會自動帶父項的 Area/Iteration、指派給自己）。"))
+			body.WriteString("\n" + styleFg(muted, "會自動帶父項的 Area/Iteration、指派給自己。"))
 			body.WriteString("\n" + styleFg(muted, "一次多張用逗號分隔，例：A,B"))
 		}
 
@@ -1847,11 +2388,10 @@ func (m model) viewTask() string {
 			body.WriteString(styleFg(muted, "專案   ") + m.mapping.AzureProject + " / " + m.mapping.AzureRepository + "\n")
 			body.WriteString(styleFg(muted, "基底   ") + m.baseBranch + "\n\n")
 			if m.branchReuse != "" {
-				body.WriteString(styleFg(okCol, "重用既有分支：") + m.branchReuse + "\n\n")
-				body.WriteString(styleFg(muted, "按 Enter 用這個分支繼續"))
+				body.WriteString(styleFg(okCol, "重用既有分支：") + m.branchReuse)
 			} else {
-				body.WriteString(styleFg(accent, "新建分支：") + m.branchName + "\n\n")
-				body.WriteString(styleFg(muted, "按 Enter 在 "+m.mapping.AzureRepository+" 建立（server 端）"))
+				body.WriteString(styleFg(accent, "新建分支：") + m.branchName + "\n")
+				body.WriteString(styleFg(dim, "會在 "+m.mapping.AzureRepository+" server 端建立"))
 			}
 		}
 
@@ -1869,12 +2409,12 @@ func (m model) viewTask() string {
 			if m.loading {
 				body.WriteString(m.spin.View() + " " + styleFg(muted, "clone 中…（第一次可能較久）"))
 			} else {
-				body.WriteString(styleFg(muted, "輸入 clone 目標資料夾，Enter 開始。"))
+				body.WriteString(styleFg(muted, "輸入 clone 目標資料夾。"))
 			}
 		} else {
 			body.WriteString(styleBold(accent, "現有專案路徑") + "\n\n")
 			body.WriteString(proj)
-			body.WriteString(styleFg(muted, "輸入專案資料夾（要有 .git），Enter 繼續。"))
+			body.WriteString(styleFg(muted, "輸入專案資料夾（要有 .git）。"))
 		}
 
 	case tkCommit:
@@ -1884,13 +2424,57 @@ func (m model) viewTask() string {
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "檢查 commit 中…"))
 		} else if m.commitCount == -1 {
-			body.WriteString(styleFg(muted, "分支還沒 push 到 origin。push 後按 Enter 重新檢查。"))
+			body.WriteString(styleFg(muted, "分支還沒 push 到 origin，push 後重新檢查。"))
 		} else if m.commitCount == 0 {
-			body.WriteString(styleFg(muted, "還沒有新 commit（vs "+m.baseBranch+"）。commit + push 後按 Enter 重新檢查。"))
+			body.WriteString(styleFg(muted, "還沒有新 commit（vs "+m.baseBranch+"），commit + push 後重新檢查。"))
 		} else {
 			body.WriteString(styleFg(okCol, fmt.Sprintf("找到 %d 個 commit：", m.commitCount)) + "\n")
-			body.WriteString(styleFg(dim, m.commits) + "\n\n")
-			body.WriteString(styleFg(muted, "按 Enter 繼續（下一步：建 PR，之後接）"))
+			body.WriteString(styleFg(dim, m.commits))
+		}
+
+	case tkReviewer:
+		body.WriteString(styleBold(accent, "選 Reviewer") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "讀取團隊成員…"))
+		} else {
+			body.WriteString(styleFg(muted, "PR ") + m.branchName + styleFg(muted, "  →  ") + m.baseBranch + "\n")
+			if len(m.allTaskIDs) > 0 {
+				body.WriteString(styleFg(muted, "連結 ") + joinTaskIDs(m.allTaskIDs) + "\n")
+			}
+			body.WriteString("\n")
+			var items []string
+			for _, r := range m.reviewers {
+				label := r.name
+				if label == "" {
+					label = r.email
+				} else {
+					label += "  " + r.email
+				}
+				if r.slackID != "" {
+					label += "  (Slack✓)"
+				}
+				items = append(items, label)
+			}
+			items = append(items, "略過（不加 reviewer）")
+			body.WriteString(renderList(items, m.revCursor))
+		}
+
+	case tkPRCreating:
+		body.WriteString(styleBold(accent, "建立 PR") + "\n\n")
+		body.WriteString(m.spin.View() + " " + styleFg(muted, "建立 PR / 加 reviewer / 通知…"))
+
+	case tkPRDone:
+		body.WriteString(styleBold(accent, "PR 已建立") + "\n\n")
+		body.WriteString(styleFg(okCol, "✓ Pull Request #"+strconv.Itoa(m.prID)) + "\n")
+		body.WriteString(styleFg(dim, m.prURL) + "\n\n")
+		if len(m.allTaskIDs) > 0 {
+			body.WriteString(styleFg(muted, "連結工作項 ") + joinTaskIDs(m.allTaskIDs) + "\n")
+		}
+		if m.revNote != "" {
+			body.WriteString(styleFg(muted, m.revNote) + "\n")
+		}
+		if m.slackMsg != "" {
+			body.WriteString(styleFg(muted, m.slackMsg) + "\n")
 		}
 	}
 
@@ -1908,7 +2492,38 @@ func (m model) viewTask() string {
 		Padding(0, 2).
 		Render(content)
 
-	return m.banner() + "\n" + box + "\n" + m.hintbar("↑↓ 選擇   ⏎ 確認   esc 取消")
+	return m.banner() + "\n" + box + "\n" + m.hintbar(m.taskHint())
+}
+
+// taskHint is the single source of key hints for the /task flow — shown only in
+// the bottom bar, not scattered inside the step box.
+func (m model) taskHint() string {
+	switch m.tstep {
+	case tkInput:
+		return "⏎ 讀取   esc 取消"
+	case tkShow:
+		return "↑↓ 移動   space 選取   ⏎ 建立/繼續   esc 取消"
+	case tkNewTask:
+		return "⏎ 建立   esc 返回"
+	case tkBranch:
+		return "⏎ 建立分支   esc 取消"
+	case tkPath:
+		return "↑↓ 選擇   ⏎ 確認   esc 取消"
+	case tkPathInput:
+		return "⏎ 確認   esc 取消"
+	case tkCommit:
+		if m.commitCount > 0 {
+			return "⏎ 繼續建 PR   esc 取消"
+		}
+		return "⏎ 重新檢查   esc 取消"
+	case tkReviewer:
+		return "↑↓ 選擇   ⏎ 確認   esc 取消"
+	case tkPRDone:
+		return "⏎ 返回"
+	case tkPRCreating:
+		return "請稍候…"
+	}
+	return "↑↓ 選擇   ⏎ 確認   esc 取消"
 }
 
 func main() {
