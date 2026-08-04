@@ -578,8 +578,9 @@ func cloneCmd(org, project, repo, dest string) tea.Cmd {
 
 // writeConfigCmd writes a vl-compatible config.json to the per-user config path
 // (%AppData%\very-lazy\config.json), creating the directory if needed, so the
-// installed binary can read it back from any working directory.
-func writeConfigCmd(org, wip string, maps []mappingEntry) tea.Cmd {
+// installed binary can read it back from any working directory. The Slack bot
+// token (a secret) goes to config.local.json next to it, never into config.json.
+func writeConfigCmd(org, wip string, maps []mappingEntry, slackChannel string, slackMembers []slackMember, slackToken string) tea.Cmd {
 	return func() tea.Msg {
 		mappings := map[string]any{}
 		for _, mp := range maps {
@@ -596,27 +597,63 @@ func writeConfigCmd(org, wip string, maps []mappingEntry) tea.Cmd {
 			}
 			mappings[mp.key] = entry
 		}
-		cfg := map[string]any{
-			"azureOrg":             org,
-			"workItemProject":      wip,
-			"azureProjectMappings": mappings,
-			"projectPaths":         map[string]any{},
-			"slackConfig":          map[string]any{"channel": "", "members": []any{}},
+		members := make([]any, 0, len(slackMembers))
+		for _, sm := range slackMembers {
+			members = append(members, map[string]any{"key": sm.Key, "value": sm.Value})
 		}
+		dest := userConfigPath()
+		existing := map[string]any{}
+		if b, e := os.ReadFile(dest); e == nil {
+			json.Unmarshal(b, &existing)
+		}
+		cfg := mergeVLConfig(existing, org, wip, mappings, slackChannel, members)
 		data, err := json.MarshalIndent(cfg, "", "  ")
 		if err != nil {
 			return writtenMsg{err: err}
 		}
-		dest := userConfigPath()
 		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
 			return writtenMsg{err: err}
 		}
 		if err := os.WriteFile(dest, data, 0o644); err != nil {
 			return writtenMsg{err: err}
 		}
+		// the token is a secret -> config.local.json (gitignored), next to config.json
+		if slackToken != "" {
+			local, _ := json.MarshalIndent(map[string]any{"slackToken": slackToken}, "", "  ")
+			os.WriteFile(filepath.Join(filepath.Dir(dest), "config.local.json"), local, 0o600)
+		}
 		abs, _ := filepath.Abs(dest)
 		return writtenMsg{path: abs}
 	}
+}
+
+// mergeVLConfig updates only the fields the wizard manages, preserving everything
+// else in the existing config (projectPaths, and each mapping's localPath) so
+// re-running /init never wipes them.
+func mergeVLConfig(existing map[string]any, org, wip string, mappings map[string]any, slackChannel string, members []any) map[string]any {
+	cfg := existing
+	if cfg == nil {
+		cfg = map[string]any{}
+	}
+	if oldMaps, ok := cfg["azureProjectMappings"].(map[string]any); ok {
+		for key, entry := range mappings {
+			old, ok1 := oldMaps[key].(map[string]any)
+			em, ok2 := entry.(map[string]any)
+			if ok1 && ok2 {
+				if lp, ok := old["localPath"]; ok {
+					em["localPath"] = lp
+				}
+			}
+		}
+	}
+	cfg["azureOrg"] = org
+	cfg["workItemProject"] = wip
+	cfg["azureProjectMappings"] = mappings
+	cfg["slackConfig"] = map[string]any{"channel": slackChannel, "members": members}
+	if _, ok := cfg["projectPaths"]; !ok {
+		cfg["projectPaths"] = map[string]any{}
+	}
+	return cfg
 }
 
 func sanitizeKey(s string) string {
