@@ -15,11 +15,23 @@ type mappingCfg struct {
 	LocalPath       string   `json:"localPath"`
 }
 
+type slackMember struct {
+	Key   string `json:"key"`   // display name / azure username (matched to a reviewer)
+	Value string `json:"value"` // Slack user id, for the @mention
+}
+
+type slackCfg struct {
+	Channel string        `json:"channel"`
+	Members []slackMember `json:"members"`
+}
+
 type config struct {
 	AzureOrg        string                `json:"azureOrg"`
 	WorkItemProject string                `json:"workItemProject"`
 	Mappings        map[string]mappingCfg `json:"azureProjectMappings"`
 	ProjectPaths    map[string]string     `json:"projectPaths"`
+	Slack           slackCfg              `json:"slackConfig"`
+	SlackToken      string                `json:"-"` // from config.local.json, never config.json
 	loadedFrom      string
 }
 
@@ -49,6 +61,15 @@ func loadConfig() (config, bool) {
 		}
 		if c.AzureOrg != "" && c.WorkItemProject != "" {
 			c.loadedFrom = p
+			// the Slack bot token lives in config.local.json next to the config
+			if b, e := os.ReadFile(filepath.Join(filepath.Dir(p), "config.local.json")); e == nil {
+				var local struct {
+					SlackToken string `json:"slackToken"`
+				}
+				if json.Unmarshal(b, &local) == nil {
+					c.SlackToken = local.SlackToken
+				}
+			}
 			return c, true
 		}
 	}
