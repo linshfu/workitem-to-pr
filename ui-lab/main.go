@@ -134,6 +134,8 @@ type model struct {
 	pUser      string
 	pCreatedID int
 	pURL       string
+	pDups      []pbiRef
+	pDupCursor int
 	pBindID    int
 	pBindKind  string // "parent" (Feature) / "related" (Release)
 	pBindType  string
@@ -276,8 +278,40 @@ func initialModel() model {
 	if !cfgOK {
 		// fresh install, no config yet -> walk straight into setup
 		m.boot = m.enterInit()
+	} else if name, arg := parseInitialArgs(os.Args[1:]); name != "" {
+		// 命令列直接觸發：nvl 35744 / nvl /task 35744 / nvl /pbi …
+		m2, cmd := m.launch(name, arg)
+		if mm, ok := m2.(model); ok {
+			m = mm
+		}
+		m.boot = cmd
 	}
 	return m
+}
+
+// parseInitialArgs 把命令列參數轉成啟動時要觸發的命令：
+//
+//	nvl 35744        -> /task 35744（純數字＝工作項 id）
+//	nvl /task 35744  -> /task 35744
+//	nvl /pbi         -> /pbi
+func parseInitialArgs(args []string) (name, arg string) {
+	if len(args) == 0 {
+		return "", ""
+	}
+	first := strings.TrimSpace(args[0])
+	if first == "" {
+		return "", ""
+	}
+	if _, err := strconv.Atoi(first); err == nil {
+		return "/task", first // 純數字＝工作項 id
+	}
+	if strings.HasPrefix(first, "/") {
+		if len(args) > 1 {
+			return first, strings.TrimSpace(args[1])
+		}
+		return first, ""
+	}
+	return "", ""
 }
 
 func (m model) Init() tea.Cmd { return tea.Batch(textinput.Blink, m.spin.Tick, m.boot) }
@@ -478,6 +512,19 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.pstep, m.pCursor = pbIter, 0
 		m.input.SetValue("")
 		m.input.Placeholder = "篩選 Iteration…"
+		return m, nil
+	case dupPbiMsg:
+		if m.mode == modePbi {
+			if msg.err == nil && len(msg.items) > 0 {
+				m.pDups, m.pDupCursor, m.loading = msg.items, 0, false
+				m.pstep = pbDupFound
+				return m, nil
+			}
+			// 查重失敗或沒有同名 -> 照常往下解析 iteration
+			m.pstep = pbResolve
+			m.loading = true
+			return m, listIterationsCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject)
+		}
 		return m, nil
 	case pbiCreatedMsg:
 		m.loading = false

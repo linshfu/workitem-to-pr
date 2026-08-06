@@ -22,6 +22,8 @@ const (
 	pbProject                 // pick project from mappings
 	pbArea                    // fallback: pick Area when the mapping has none
 	pbTitle                   // enter the PBI title
+	pbDupCheck                // 查是否已有同名 PBI
+	pbDupFound                // 有同名，讓使用者選：仍新建 / 取消
 	pbResolve                 // resolve the current-month iteration
 	pbIter                    // fallback: pick Iteration when the month is missing
 	pbConfirm                 // show summary, Enter to create
@@ -265,13 +267,58 @@ func (m model) pbiHome() model {
 
 // pbiPhase 回傳目前在第幾個概念步驟（1..5）。Area / Iteration 的 fallback 併入
 // 「選專案」「確認資料」，讓步驟表固定 5 步、不會忽多忽少。
+type pbiRef struct {
+	id       int
+	title    string
+	state    string
+	assignee string
+}
+
+type dupPbiMsg struct {
+	items []pbiRef
+	err   error
+}
+
+// searchPbiByTitleCmd 查同專案是否已有同名的 PBI（標題完全相同），用來在建立前提醒重複。
+func searchPbiByTitleCmd(org, project, title string) tea.Cmd {
+	return func() tea.Msg {
+		esc := strings.ReplaceAll(title, "'", "''") // WIQL 字串用兩個單引號跳脫
+		wiql := "SELECT [System.Id],[System.Title],[System.State],[System.AssignedTo] FROM WorkItems" +
+			" WHERE [System.TeamProject]='" + project + "'" +
+			" AND [System.WorkItemType]='Product Backlog Item'" +
+			" AND [System.Title]='" + esc + "'"
+		out, err := run("az", "boards", "query", "--organization", org, "--project", project, "--wiql", wiql, "-o", "json")
+		if err != nil {
+			return dupPbiMsg{err: err}
+		}
+		var rows []struct {
+			ID     int `json:"id"`
+			Fields struct {
+				Title    string `json:"System.Title"`
+				State    string `json:"System.State"`
+				Assigned struct {
+					DisplayName string `json:"displayName"`
+				} `json:"System.AssignedTo"`
+			} `json:"fields"`
+		}
+		if json.Unmarshal([]byte(out), &rows) != nil {
+			return dupPbiMsg{} // 解析不出＝當作沒重複，不擋流程
+		}
+		items := make([]pbiRef, 0, len(rows))
+		for _, r := range rows {
+			items = append(items, pbiRef{id: r.ID, title: r.Fields.Title, state: r.Fields.State, assignee: r.Fields.Assigned.DisplayName})
+		}
+		return dupPbiMsg{items: items}
+	}
+}
+
 func (m model) pbiPhase() int {
 	switch m.pstep {
 	case pbBind:
 		return 1
 	case pbProject, pbArea:
 		return 2
-	case pbTitle:
+	case pbTitle, pbDupCheck, pbDupFound:
 		return 3
 	case pbResolve, pbIter, pbConfirm:
 		return 4
@@ -413,13 +460,29 @@ func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.pTitle = t
 			m.input.SetValue("")
-			m.pstep = pbResolve
+			m.pstep = pbDupCheck
 			m.loading = true
-			return m, listIterationsCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject)
+			return m, searchPbiByTitleCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject, t)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
 		return m, cmd
+
+	case pbDupFound:
+		switch key.String() {
+		case "up":
+			m.pDupCursor = (m.pDupCursor - 1 + 2) % 2
+		case "down":
+			m.pDupCursor = (m.pDupCursor + 1) % 2
+		case "enter":
+			if m.pDupCursor == 0 { // 仍要新建
+				m.pstep = pbResolve
+				m.loading = true
+				return m, listIterationsCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject)
+			}
+			return m.pbiHome(), nil // 取消，去用現有的
+		}
+		return m, nil
 
 	case pbIter:
 		items := m.pbiIterItems()
@@ -498,6 +561,21 @@ func (m model) viewPbi() string {
 		body.WriteString(styleFg(muted, "專案 ") + m.pMapKey + "\n")
 		body.WriteString(styleFg(muted, "Area ") + m.pAreaPath + "\n\n")
 		body.WriteString(styleFg(muted, "輸入 PBI 標題。"))
+	case pbDupCheck:
+		body.WriteString(styleBold(accent, "建立 PBI — 查重") + "\n\n")
+		body.WriteString(m.spin.View() + " " + styleFg(muted, "查詢是否已有同名 PBI…"))
+	case pbDupFound:
+		body.WriteString(styleBold(accent, "已有同名 PBI") + "\n\n")
+		body.WriteString(styleFg(muted, "「"+m.pTitle+"」已經存在下列 PBI：") + "\n\n")
+		for _, d := range m.pDups {
+			meta := d.state
+			if d.assignee != "" {
+				meta += " · " + d.assignee
+			}
+			body.WriteString("  " + styleFg(accent, "#"+strconv.Itoa(d.id)) + " " + d.title + "  " + styleFg(dim, meta) + "\n")
+		}
+		body.WriteString("\n")
+		body.WriteString(renderList([]string{"仍要新建一張", "取消（去用上面現有的）"}, m.pDupCursor))
 	case pbResolve:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(m.spin.View() + " " + styleFg(muted, "確認 Iteration…"))
@@ -555,7 +633,7 @@ func (m model) viewPbi() string {
 		hint = "⏎ 建立   esc 取消"
 	case pbDone:
 		hint = "⏎ 返回"
-	case pbResolve, pbCreating, pbBinding:
+	case pbResolve, pbCreating, pbBinding, pbDupCheck:
 		hint = "請稍候…"
 	}
 	return m.banner() + m.pbiStepsView() + "\n" + box + "\n" + m.hintbar(hint)
