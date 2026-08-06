@@ -115,45 +115,57 @@ func listReviewersCmd(org, project string, members []slackMember) tea.Cmd {
 // and turns on auto-complete. Mirrors the PowerShell Start-Pr.
 func createPRCmd(org, project, repo, source, target, title, desc string, workItems []int, rev reviewer) tea.Cmd {
 	return func() tea.Msg {
-		args := []string{"repos", "pr", "create",
-			"--organization", org, "--project", project, "--repository", repo,
-			"--source-branch", source, "--target-branch", target,
-			"--title", title, "--description", desc,
-			"--transition-work-items", "true", "--delete-source-branch", "true", "-o", "json"}
-		if len(workItems) > 0 {
-			args = append(args, "--work-items")
-			for _, id := range workItems {
-				args = append(args, strconv.Itoa(id))
-			}
-		}
-		out, err := run("az", args...)
-		if err != nil {
-			return prCreatedMsg{err: err}
-		}
-		var pr struct {
-			PullRequestID int    `json:"pullRequestId"`
-			Title         string `json:"title"`
-		}
-		if json.Unmarshal([]byte(out), &pr) != nil || pr.PullRequestID == 0 {
-			return prCreatedMsg{err: errors.New("建立 PR 失敗：沒有 pullRequestId")}
-		}
-		link := strings.TrimRight(org, "/") + "/" + url.PathEscape(project) +
-			"/_git/" + url.PathEscape(repo) + "/pullrequest/" + strconv.Itoa(pr.PullRequestID)
-
-		revErr := ""
-		if rev.email != "" {
-			if _, e := run("az", "repos", "pr", "reviewer", "add",
-				"--id", strconv.Itoa(pr.PullRequestID), "--reviewers", rev.email,
-				"--required", "--organization", org, "-o", "json"); e != nil {
-				revErr = e.Error()
-			} else {
-				run("az", "repos", "pr", "update",
-					"--id", strconv.Itoa(pr.PullRequestID), "--auto-complete", "true",
-					"--organization", org, "-o", "json")
-			}
-		}
-		return prCreatedMsg{id: pr.PullRequestID, url: link, title: pr.Title, reviewerErr: revErr}
+		return createOnePR(org, project, repo, source, target, title, desc, workItems, rev, true)
 	}
+}
+
+// createOnePR builds one PR (deleteSource controls whether the source branch is
+// removed on merge) and, when a reviewer is given, adds them as required and turns
+// on auto-complete. Shared by /task (deletes source) and /release (master keeps the
+// branch so the develop PR can still use it; develop deletes it).
+func createOnePR(org, project, repo, source, target, title, desc string, workItems []int, rev reviewer, deleteSource bool) prCreatedMsg {
+	del := "false"
+	if deleteSource {
+		del = "true"
+	}
+	args := []string{"repos", "pr", "create",
+		"--organization", org, "--project", project, "--repository", repo,
+		"--source-branch", source, "--target-branch", target,
+		"--title", title, "--description", desc,
+		"--transition-work-items", "true", "--delete-source-branch", del, "-o", "json"}
+	if len(workItems) > 0 {
+		args = append(args, "--work-items")
+		for _, id := range workItems {
+			args = append(args, strconv.Itoa(id))
+		}
+	}
+	out, err := run("az", args...)
+	if err != nil {
+		return prCreatedMsg{err: err}
+	}
+	var pr struct {
+		PullRequestID int    `json:"pullRequestId"`
+		Title         string `json:"title"`
+	}
+	if json.Unmarshal([]byte(out), &pr) != nil || pr.PullRequestID == 0 {
+		return prCreatedMsg{err: errors.New("建立 PR 失敗：沒有 pullRequestId")}
+	}
+	link := strings.TrimRight(org, "/") + "/" + url.PathEscape(project) +
+		"/_git/" + url.PathEscape(repo) + "/pullrequest/" + strconv.Itoa(pr.PullRequestID)
+
+	revErr := ""
+	if rev.email != "" {
+		if _, e := run("az", "repos", "pr", "reviewer", "add",
+			"--id", strconv.Itoa(pr.PullRequestID), "--reviewers", rev.email,
+			"--required", "--organization", org, "-o", "json"); e != nil {
+			revErr = e.Error()
+		} else {
+			run("az", "repos", "pr", "update",
+				"--id", strconv.Itoa(pr.PullRequestID), "--auto-complete", "true",
+				"--organization", org, "-o", "json")
+		}
+	}
+	return prCreatedMsg{id: pr.PullRequestID, url: link, title: pr.Title, reviewerErr: revErr}
 }
 
 // prResultText is the Slack-friendly summary (matches the PowerShell format).

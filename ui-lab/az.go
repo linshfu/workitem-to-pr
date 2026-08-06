@@ -656,6 +656,41 @@ func mergeVLConfig(existing map[string]any, org, wip string, mappings map[string
 	return cfg
 }
 
+type projectPathSavedMsg struct {
+	key  string
+	path string
+	err  error
+}
+
+// saveProjectPathCmd 把某個對應的本機路徑寫進 config 的 projectPaths（保留其餘設定），
+// 讓 /release、/hotfix 之後讀得到。/task 填現有資料夾或 clone 完成時呼叫。
+func saveProjectPathCmd(mapKey, localPath string) tea.Cmd {
+	return func() tea.Msg {
+		dest := userConfigPath()
+		existing := map[string]any{}
+		if b, e := os.ReadFile(dest); e == nil {
+			json.Unmarshal(b, &existing)
+		}
+		pp, _ := existing["projectPaths"].(map[string]any)
+		if pp == nil {
+			pp = map[string]any{}
+		}
+		pp[mapKey] = localPath
+		existing["projectPaths"] = pp
+		data, err := json.MarshalIndent(existing, "", "  ")
+		if err != nil {
+			return projectPathSavedMsg{err: err}
+		}
+		if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+			return projectPathSavedMsg{err: err}
+		}
+		if err := os.WriteFile(dest, data, 0o644); err != nil {
+			return projectPathSavedMsg{err: err}
+		}
+		return projectPathSavedMsg{key: mapKey, path: localPath}
+	}
+}
+
 func sanitizeKey(s string) string {
 	s = strings.ToLower(s)
 	var b strings.Builder

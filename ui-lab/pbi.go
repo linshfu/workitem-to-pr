@@ -18,13 +18,15 @@ import (
 type pbiStep int
 
 const (
-	pbProject  pbiStep = iota // pick project from mappings
+	pbBind     pbiStep = iota // (可選) 綁定目標單：Feature→parent / Release→related
+	pbProject                 // pick project from mappings
 	pbArea                    // fallback: pick Area when the mapping has none
 	pbTitle                   // enter the PBI title
 	pbResolve                 // resolve the current-month iteration
 	pbIter                    // fallback: pick Iteration when the month is missing
 	pbConfirm                 // show summary, Enter to create
 	pbCreating                // creating…
+	pbBinding                 // linking the new PBI to the target work item
 	pbDone                    // created, show id + url
 )
 
@@ -127,6 +129,36 @@ func createPbiCmd(org, project, title, area, iteration, assignee string) tea.Cmd
 	}
 }
 
+type bindTargetMsg struct {
+	id    int
+	typ   string
+	title string
+	err   error
+}
+
+type bindDoneMsg struct{ err error }
+
+// fetchBindTargetCmd 查要綁的目標單，回傳其 type/title 供判斷 parent/related。
+func fetchBindTargetCmd(org string, id int) tea.Cmd {
+	return func() tea.Msg {
+		wi, err := showWorkItem(org, id)
+		if err != nil {
+			return bindTargetMsg{err: err}
+		}
+		return bindTargetMsg{id: wi.id, typ: wi.typ, title: wi.title}
+	}
+}
+
+// addRelationCmd 把新 PBI 綁到目標單（parent = 掛在 Feature 下 / related = 關聯 Release）。
+func addRelationCmd(org string, pbiID int, kind string, targetID int) tea.Cmd {
+	return func() tea.Msg {
+		_, err := run("az", "boards", "work-item", "relation", "add",
+			"--id", strconv.Itoa(pbiID), "--relation-type", kind,
+			"--target-id", strconv.Itoa(targetID), "--organization", org, "-o", "json")
+		return bindDoneMsg{err: err}
+	}
+}
+
 // computeIterPath is the auto-guessed current-month iteration: "<wiProject>\<year>年\<month>月".
 func (m model) computeIterPath() string {
 	now := time.Now()
@@ -166,14 +198,15 @@ func (m *model) enterPbi() tea.Cmd {
 		return nil
 	}
 	m.mode = modePbi
-	m.pstep = pbProject
+	m.pstep = pbBind
 	m.errMsg = ""
 	m.pKeys = sortedMappingKeys(m.cfg.Mappings)
 	m.pCursor = 0
 	m.pMapKey, m.pAreaPath, m.pTitle, m.pIterPath, m.pUser = "", "", "", "", ""
 	m.pCreatedID, m.pURL = 0, ""
+	m.pBindID, m.pBindKind, m.pBindType, m.pBindTitle = 0, "", "", ""
 	m.input.SetValue("")
-	m.input.Placeholder = "篩選專案…"
+	m.input.Placeholder = "要綁的單 ID(可留空直接 Enter 跳過)"
 	return whoAmICmd() // resolve assignee in the background
 }
 
@@ -230,12 +263,78 @@ func (m model) pbiHome() model {
 	return m
 }
 
+// pbiPhase 回傳目前在第幾個概念步驟（1..5）。Area / Iteration 的 fallback 併入
+// 「選專案」「確認資料」，讓步驟表固定 5 步、不會忽多忽少。
+func (m model) pbiPhase() int {
+	switch m.pstep {
+	case pbBind:
+		return 1
+	case pbProject, pbArea:
+		return 2
+	case pbTitle:
+		return 3
+	case pbResolve, pbIter, pbConfirm:
+		return 4
+	default: // pbCreating, pbBinding, pbDone
+		return 5
+	}
+}
+
+// pbiStepsView 列出 /pbi 的所有步驟。前面的查詢/選擇都只是讀取或本地暫存，
+// 只有最後「建立（＋綁定）」會真的寫入 Azure。
+func (m model) pbiStepsView() string {
+	cur := m.pbiPhase()
+	bindVal := ""
+	if m.pBindID > 0 {
+		bindVal = fmt.Sprintf("%s #%d（%s）", m.pBindType, m.pBindID, m.pBindKind)
+	} else if cur > 1 {
+		bindVal = "略過"
+	}
+	createLabel := "建立 PBI"
+	if m.pBindID > 0 {
+		createLabel = "建立 PBI ＋ 綁定"
+	}
+	return stepsView([]wizStep{
+		{label: "綁定目標單（可選）", val: bindVal},
+		{label: "選專案", val: m.pMapKey},
+		{label: "輸入標題", val: m.pTitle},
+		{label: "確認資料", val: m.pIterPath},
+		{label: createLabel, mutates: true},
+	}, cur)
+}
+
 func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
-	if key.String() == "esc" && m.pstep != pbCreating {
+	if key.String() == "esc" && m.pstep != pbCreating && m.pstep != pbBinding {
 		return m.pbiHome(), nil
 	}
 
 	switch m.pstep {
+	case pbBind:
+		if m.loading {
+			return m, nil
+		}
+		if key.String() == "enter" {
+			raw := strings.TrimSpace(m.input.Value())
+			if raw == "" {
+				m.pBindID, m.pBindKind = 0, ""
+				m.errMsg = ""
+				m.pstep = pbProject
+				m.input.SetValue("")
+				m.input.Placeholder = "篩選專案…"
+				return m, nil
+			}
+			id, err := strconv.Atoi(raw)
+			if err != nil || id <= 0 {
+				m.errMsg = "請輸入數字工作項 ID，或留空 Enter 跳過"
+				return m, nil
+			}
+			m.loading = true
+			m.errMsg = ""
+			return m, fetchBindTargetCmd(m.cfg.AzureOrg, id)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
 	case pbProject:
 		keys := m.pbiFilteredKeys()
 		switch key.String() {
@@ -372,6 +471,13 @@ func (m model) viewPbi() string {
 	var body strings.Builder
 
 	switch m.pstep {
+	case pbBind:
+		body.WriteString(styleBold(accent, "建立 PBI — 綁定目標單（可選）") + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "查詢目標單…"))
+		} else {
+			body.WriteString(styleFg(muted, "輸入要綁的單 ID：Feature 用 parent、Release 用 related 綁；留空 Enter 跳過。"))
+		}
 	case pbProject:
 		body.WriteString(styleBold(accent, "建立 PBI — 選專案") + "\n\n")
 		body.WriteString(renderList(m.pbiProjectItems(), m.pCursor))
@@ -409,9 +515,16 @@ func (m model) viewPbi() string {
 		body.WriteString(styleFg(muted, "Area      ") + m.pAreaPath + "\n")
 		body.WriteString(styleFg(muted, "Iteration ") + m.pIterPath + "\n")
 		body.WriteString(styleFg(muted, "指派給    ") + who)
+		body.WriteString("\n\n" + styleFg(errCol, "⚠ 按 Enter 會實際建立 PBI"))
+		if m.pBindID > 0 {
+			body.WriteString(styleFg(errCol, "，並綁定 "+m.pBindType+" #"+strconv.Itoa(m.pBindID)))
+		}
 	case pbCreating:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(m.spin.View() + " " + styleFg(muted, "建立中…"))
+	case pbBinding:
+		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
+		body.WriteString(m.spin.View() + " " + styleFg(muted, fmt.Sprintf("綁定到 %s #%d…", m.pBindType, m.pBindID)))
 	case pbDone:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(styleFg(okCol, fmt.Sprintf("✓ 已建立 PBI #%d", m.pCreatedID)) + "\n")
@@ -423,7 +536,7 @@ func (m model) viewPbi() string {
 	}
 
 	content := strings.TrimRight(body.String(), "\n")
-	if m.pstep == pbProject || m.pstep == pbArea || m.pstep == pbTitle || m.pstep == pbIter {
+	if m.pstep == pbBind || m.pstep == pbProject || m.pstep == pbArea || m.pstep == pbTitle || m.pstep == pbIter {
 		content = m.input.View() + "\n\n" + content
 	}
 	box := lipgloss.NewStyle().
@@ -434,14 +547,16 @@ func (m model) viewPbi() string {
 
 	hint := "↑↓ 選擇   ⏎ 確認   esc 取消"
 	switch m.pstep {
+	case pbBind:
+		hint = "⏎ 綁定/跳過   esc 取消"
 	case pbTitle:
 		hint = "⏎ 繼續   esc 取消"
 	case pbConfirm:
 		hint = "⏎ 建立   esc 取消"
 	case pbDone:
 		hint = "⏎ 返回"
-	case pbResolve, pbCreating:
+	case pbResolve, pbCreating, pbBinding:
 		hint = "請稍候…"
 	}
-	return m.banner() + "\n" + box + "\n" + m.hintbar(hint)
+	return m.banner() + m.pbiStepsView() + "\n" + box + "\n" + m.hintbar(hint)
 }

@@ -45,6 +45,7 @@ const (
 	modeUpdate
 	modePbi
 	modeHelp
+	modeRelease
 )
 
 type taskStep int
@@ -74,7 +75,8 @@ const (
 	stCodeProj
 	stCodeRepo
 	stMore
-	stReuse // menu shown when re-running init over an existing config
+	stReuse   // menu shown when re-running init over an existing config
+	stMapPath // 從 stMore 清單設定某個對應的本機路徑
 	stSlackAsk
 	stSlackToken
 	stSlackMode // pick existing channel vs create a new one
@@ -132,6 +134,10 @@ type model struct {
 	pUser      string
 	pCreatedID int
 	pURL       string
+	pBindID    int
+	pBindKind  string // "parent" (Feature) / "related" (Release)
+	pBindType  string
+	pBindTitle string
 
 	// home palette
 	cmdMatches []command
@@ -162,9 +168,10 @@ type model struct {
 	repo       repoInfo
 
 	// current mapping being built
-	curArea  areaInfo
-	curAlias string
-	curKey   string
+	curArea   areaInfo
+	curAlias  string
+	curKey    string
+	curMapKey string // stMapPath：正在設本機路徑的對應 key
 
 	mappings   []mappingEntry
 	moreCursor int
@@ -228,6 +235,19 @@ type model struct {
 	prResult  string
 	revNote   string
 	slackMsg  string
+
+	// release / hotfix
+	rstep        releaseStep
+	rlKeys       []string
+	rlCursor     int
+	rlMapKey     string
+	rlMapping    mappingCfg
+	rlPath       string
+	rlVersion    string
+	rlBranch     string
+	rlMasterURL  string
+	rlDevelopURL string
+	rlPRResult   string
 }
 
 func initialModel() model {
@@ -465,7 +485,40 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.errMsg, m.pstep = msg.err.Error(), pbConfirm
 			return m, nil
 		}
-		m.pCreatedID, m.pURL, m.pstep, m.errMsg = msg.id, msg.url, pbDone, ""
+		m.pCreatedID, m.pURL, m.errMsg = msg.id, msg.url, ""
+		if m.pBindID > 0 {
+			m.pstep = pbBinding
+			m.loading = true
+			return m, addRelationCmd(m.cfg.AzureOrg, msg.id, m.pBindKind, m.pBindID)
+		}
+		m.pstep = pbDone
+		return m, nil
+	case bindTargetMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "查不到工作項:" + msg.err.Error()
+			return m, nil
+		}
+		switch {
+		case strings.EqualFold(msg.typ, "Feature"):
+			m.pBindKind = "parent"
+		case strings.EqualFold(msg.typ, "Release"):
+			m.pBindKind = "related"
+		default:
+			m.errMsg = fmt.Sprintf("只能綁 Feature(parent) 或 Release(related)，這張 #%d 是 %s", msg.id, msg.typ)
+			return m, nil
+		}
+		m.pBindID, m.pBindType, m.pBindTitle, m.errMsg = msg.id, msg.typ, msg.title, ""
+		m.pstep = pbProject
+		m.input.SetValue("")
+		m.input.Placeholder = "篩選專案…"
+		return m, nil
+	case bindDoneMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "PBI 已建立，但綁定失敗:" + msg.err.Error()
+		}
+		m.pstep = pbDone
 		return m, nil
 	case workItemMsg:
 		m.loading = false
@@ -544,6 +597,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.tstep = tkPRDone
 		return m, openURLCmd(m.prURL)
 	case slackDoneMsg:
+		if m.mode == modeRelease {
+			return m.onReleaseSlackDone(msg)
+		}
 		m.loading = false
 		if msg.err != nil {
 			m.slackMsg = "Slack 通知失敗:" + msg.err.Error()
@@ -552,6 +608,10 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.tstep = tkPRDone
 		return m, nil
+	case releaseRanMsg:
+		return m.onReleaseRan(msg)
+	case releasePRsMsg:
+		return m.onReleasePRs(msg)
 	case refsMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -598,9 +658,18 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.localPath, m.errMsg = msg.path, ""
+		if m.cfg.ProjectPaths == nil {
+			m.cfg.ProjectPaths = map[string]string{}
+		}
+		m.cfg.ProjectPaths[m.mapKey] = msg.path
 		m.tstep = tkCommit
 		m.loading = true
-		return m, commitCheckCmd(m.localPath, m.baseBranch, m.branchName)
+		return m, tea.Batch(saveProjectPathCmd(m.mapKey, msg.path), commitCheckCmd(m.localPath, m.baseBranch, m.branchName))
+	case projectPathSavedMsg:
+		if msg.err != nil {
+			dbg("save projectPath failed: %v", msg.err)
+		}
+		return m, nil
 	case writtenMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -656,6 +725,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modePbi {
 			return m.updatePbi(msg)
+		}
+		if m.mode == modeRelease {
+			return m.updateRelease(msg)
 		}
 		if m.mode == modeHelp {
 			switch msg.String() {
@@ -858,6 +930,9 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 	case "/pbi":
 		return m, m.enterPbi()
 
+	case "/release":
+		return m, m.enterRelease()
+
 	case "/help":
 		m.mode = modeHelp
 		m.input.SetValue("")
@@ -888,6 +963,12 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 
 func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "esc" {
+		if m.step == stMapPath {
+			m.step = stMore
+			m.input.SetValue("")
+			m.input.Placeholder = ""
+			return m, nil
+		}
 		m.mode = modeHome
 		m.loading = false
 		m.errMsg = ""
@@ -1183,29 +1264,64 @@ func (m model) updateInit(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case stMore:
+		n := len(m.mappings) + 2 // 每個對應可選（設本機路徑）＋ 再加 ＋ 完成
 		switch key.String() {
-		case "up", "down":
-			m.moreCursor = (m.moreCursor + 1) % 2
+		case "up":
+			m.moreCursor = (m.moreCursor - 1 + n) % n
+		case "down":
+			m.moreCursor = (m.moreCursor + 1) % n
 		case "enter":
-			if m.moreCursor == 0 {
+			switch {
+			case m.moreCursor < len(m.mappings):
+				// 設某個對應的本機路徑
+				m.curMapKey = m.mappings[m.moreCursor].key
+				m.step = stMapPath
+				m.errMsg = ""
+				m.input.SetValue(mappingLocalPathOf(m.cfg, m.curMapKey))
+				m.input.CursorEnd()
+				m.input.Placeholder = "本機資料夾路徑（要有 .git；留空取消）"
+				return m, nil
+			case m.moreCursor == len(m.mappings):
+				// 再加一個對應
 				if m.identMode == identTag {
 					m.gotoTag()
 					return m, nil
 				}
 				cmd := m.gotoCodeProj("")
 				return m, cmd
+			default:
+				// 完成
+				if m.returnToReuse {
+					m.returnToReuse = false
+					m.step = stReuse
+				} else {
+					m.step = stSlackAsk
+					m.slackAskCursor = 0
+				}
+				m.input.SetValue("")
+				m.input.Placeholder = ""
 			}
-			if m.returnToReuse {
-				m.returnToReuse = false
-				m.step = stReuse
-			} else {
-				m.step = stSlackAsk
-				m.slackAskCursor = 0
-			}
-			m.input.SetValue("")
-			m.input.Placeholder = ""
 		}
 		return m, nil
+
+	case stMapPath:
+		if key.String() == "enter" {
+			p := cleanPath(m.input.Value())
+			m.step = stMore
+			m.input.SetValue("")
+			m.input.Placeholder = ""
+			if p == "" {
+				return m, nil // 留空＝取消，不動原設定
+			}
+			if m.cfg.ProjectPaths == nil {
+				m.cfg.ProjectPaths = map[string]string{}
+			}
+			m.cfg.ProjectPaths[m.curMapKey] = p
+			return m, saveProjectPathCmd(m.curMapKey, p)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
 
 	case stSlackAsk:
 		switch key.String() {
@@ -1455,6 +1571,11 @@ func deriveBranchName(taskID int, title string) string {
 	return fmt.Sprintf("task/%d-%s", taskID, c)
 }
 
+// cleanPath 去掉使用者貼路徑時常帶的前後引號與空白（檔案總管「複製路徑」會加雙引號）。
+func cleanPath(p string) string {
+	return strings.TrimSpace(strings.Trim(strings.TrimSpace(p), "\"'"))
+}
+
 func (m model) resolveLocalPath() string {
 	for _, p := range []string{
 		m.mapping.LocalPath,
@@ -1462,8 +1583,8 @@ func (m model) resolveLocalPath() string {
 		m.cfg.ProjectPaths[m.mapping.AzureRepository],
 		m.cfg.ProjectPaths[m.mapping.AzureProject],
 	} {
-		if p != "" {
-			return p
+		if c := cleanPath(p); c != "" {
+			return c
 		}
 	}
 	return ""
@@ -1703,7 +1824,7 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		if key.String() == "enter" {
-			p := strings.TrimSpace(m.input.Value())
+			p := cleanPath(m.input.Value())
 			if p == "" {
 				return m, nil
 			}
@@ -1717,10 +1838,14 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, nil
 			}
 			m.localPath = p
+			if m.cfg.ProjectPaths == nil {
+				m.cfg.ProjectPaths = map[string]string{}
+			}
+			m.cfg.ProjectPaths[m.mapKey] = p
 			m.tstep = tkCommit
 			m.loading = true
 			m.errMsg = ""
-			return m, commitCheckCmd(m.localPath, m.baseBranch, m.branchName)
+			return m, tea.Batch(saveProjectPathCmd(m.mapKey, p), commitCheckCmd(m.localPath, m.baseBranch, m.branchName))
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
@@ -1881,6 +2006,25 @@ func (m *model) finalizeMapping() {
 	m.curArea, m.curAlias, m.curKey = areaInfo{}, "", ""
 }
 
+// moreItems 是 stMore 的可選清單：每個對應一項（可設本機路徑）＋ 再加 ＋ 完成。
+func (m model) moreItems() []string {
+	var items []string
+	for _, e := range m.mappings {
+		suffix := "（未設路徑）"
+		if mappingLocalPathOf(m.cfg, e.key) != "" {
+			suffix = "（已設）"
+		}
+		items = append(items, "設本機路徑："+e.key+suffix)
+	}
+	items = append(items, "再加一個對應")
+	if m.returnToReuse {
+		items = append(items, "完成，回選單")
+	} else {
+		items = append(items, "完成，寫入設定")
+	}
+	return items
+}
+
 // orgItems is the filtered org list plus a trailing manual-entry sentinel.
 func (m model) orgItems() []string {
 	q := strings.TrimSpace(m.input.Value())
@@ -1952,6 +2096,9 @@ func (m model) View() string {
 	if m.mode == modePbi {
 		return m.viewPbi()
 	}
+	if m.mode == modeRelease {
+		return m.viewRelease()
+	}
 	if m.mode == modeHelp {
 		return m.viewHelp()
 	}
@@ -1976,7 +2123,7 @@ func (m model) commandBar() string {
 // (as a list filter or a value entry). Those steps render the input inside the box.
 func (m model) stepUsesInput() bool {
 	switch m.step {
-	case stOrg, stWIP, stArea, stCodeProj, stCodeRepo, stTag, stSlackToken, stSlackPick, stSlackNew:
+	case stOrg, stWIP, stArea, stCodeProj, stCodeRepo, stTag, stMapPath, stSlackToken, stSlackPick, stSlackNew:
 		return true
 	}
 	return false
@@ -2003,7 +2150,7 @@ func (m model) viewHelp() string {
 		{"/pbi", "建立 PBI：選專案 → 標題 → 自動帶 Area、當月 Iteration、指派給自己", ""},
 		{"/init", "初始化精靈：檢查環境、az 探索、產生 config，可選設定 Slack", "重跑會進「已有設定」選單，只改你要改的（不清掉舊設定）"},
 		{"/update", "更新到最新版（下載並自我替換）", ""},
-		{"/release", "建立 Release PR", "（規劃中）"},
+		{"/release", "跑 release.sh，成功後開 master / develop PR + Slack", ""},
 		{"/hotfix", "Hotfix 流程", "（規劃中）"},
 		{"/help", "這個畫面", ""},
 	}
@@ -2238,18 +2385,25 @@ func (m model) viewInit() string {
 	case stMore:
 		body.WriteString(styleBold(accent, "已加入的對應") + "\n\n")
 		for _, e := range m.mappings {
-			body.WriteString("  " + styleFg(accent, e.key) + styleFg(muted, " → "+e.project+"/"+e.repo))
+			body.WriteString("  " + styleFg(accent, e.key) + styleFg(muted, " → "+e.project+"/"+e.repo) + "\n")
+			if lp := mappingLocalPathOf(m.cfg, e.key); lp != "" {
+				body.WriteString("      " + styleFg(dim, "本機 ") + styleFg(okCol, lp))
+			} else {
+				body.WriteString("      " + styleFg(dim, "本機 ") + styleFg(errCol, "未設") + styleFg(dim, "（/release 需要）"))
+			}
 			if e.areaPath != "" {
-				body.WriteString(styleFg(dim, "  ["+e.areaPath+"]"))
+				body.WriteString(styleFg(dim, "   area "+e.areaPath))
 			}
 			body.WriteString("\n")
 		}
 		body.WriteString("\n")
-		moreDone := "完成，寫入設定"
-		if m.returnToReuse {
-			moreDone = "完成，回選單"
-		}
-		body.WriteString(renderList([]string{"再加一個對應", moreDone}, m.moreCursor))
+		body.WriteString(renderList(m.moreItems(), m.moreCursor))
+
+	case stMapPath:
+		body.WriteString(styleBold(accent, "設定本機路徑") + "\n\n")
+		body.WriteString(styleFg(muted, "對應 ") + m.curMapKey + "\n\n")
+		body.WriteString(styleFg(muted, "輸入這個專案在你電腦上的資料夾（要有 .git）。") + "\n")
+		body.WriteString(styleFg(muted, "/release、/hotfix 會在這裡跑 release.sh。留空或 esc 取消。"))
 
 	case stReuse:
 		body.WriteString(styleBold(accent, "已有設定 — 要改哪個？") + "\n\n")
@@ -2396,6 +2550,8 @@ func (m model) initHint() string {
 		return "↑↓ 選擇   ⏎ 確認   esc 取消"
 	case stTag:
 		return "⏎ 繼續   esc 取消"
+	case stMapPath:
+		return "⏎ 儲存   esc 取消"
 	case stSlackToken:
 		return "⏎ 驗證   esc 取消"
 	case stSlackNew:
@@ -2416,6 +2572,58 @@ func renderAreaList(items []areaInfo, cursor int) string {
 		}
 		return "  " + styleFg(muted, a.name) + "  " + styleFg(dim, a.path)
 	})
+}
+
+// taskPhase 回傳目前在第幾個概念步驟（1..7）。
+func (m model) taskPhase() int {
+	switch m.tstep {
+	case tkInput:
+		return 1
+	case tkShow, tkNewTask:
+		return 2
+	case tkBranch:
+		return 3
+	case tkPath, tkPathInput:
+		return 4
+	case tkCommit:
+		return 5
+	case tkReviewer:
+		return 6
+	default: // tkPRCreating, tkPRDone
+		return 7
+	}
+}
+
+// taskStepsView 列出 /task 的所有步驟。會實際寫入的步驟（建新 Task、建分支、建 PR）標 ⚠；
+// 純選現有 Task 或重用既有分支時，該步就不算寫入。
+func (m model) taskStepsView() string {
+	wiVal := ""
+	if m.wi.id > 0 {
+		wiVal = "#" + strconv.Itoa(m.wi.id)
+	}
+	taskVal := ""
+	if n := len(m.allTaskIDs); n > 0 {
+		taskVal = fmt.Sprintf("%d 張", n)
+	} else if n := len(m.selOrder); n > 0 {
+		taskVal = fmt.Sprintf("%d 張", n)
+	}
+	newTask := m.tstep == tkNewTask || len(m.newIDs) > 0
+
+	branchVal := m.branchName
+	if m.branchReuse != "" {
+		branchVal = "重用 " + m.branchReuse
+	}
+	makesBranch := m.branchReuse == ""
+
+	return stepsView([]wizStep{
+		{label: "工作項 ID", val: wiVal},
+		{label: "選 / 建 Task", val: taskVal, mutates: newTask},
+		{label: "建分支", val: branchVal, mutates: makesBranch},
+		{label: "本機路徑", val: m.localPath},
+		{label: "確認 commit"},
+		{label: "選 reviewer"},
+		{label: "建 PR＋通知", mutates: true},
+	}, m.taskPhase())
 }
 
 func (m model) viewTask() string {
@@ -2573,7 +2781,7 @@ func (m model) viewTask() string {
 		Padding(0, 2).
 		Render(content)
 
-	return m.banner() + "\n" + box + "\n" + m.hintbar(m.taskHint())
+	return m.banner() + m.taskStepsView() + "\n" + box + "\n" + m.hintbar(m.taskHint())
 }
 
 // taskHint is the single source of key hints for the /task flow — shown only in

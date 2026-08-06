@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -24,6 +25,41 @@ func styleFg(c lipgloss.Color, s string) string {
 
 func styleBold(c lipgloss.Color, s string) string {
 	return lipgloss.NewStyle().Foreground(c).Bold(true).Render(s)
+}
+
+// ---- wizard step tracker（/pbi、/task、/release 共用）----
+
+type wizStep struct {
+	label   string
+	val     string // 已選/已填的值，顯示在步驟名後
+	mutates bool   // 這步執行後會真的建立/寫入實體（建單、建分支、建 PR、push…）
+}
+
+// stepsView 一次列出所有步驟、標出目前在哪一步（✓ 完成 / ▶ 現在 / ○ 未到），
+// 並在會實際寫入的步驟標 ⚠。cur 是目前第幾步（1-based）。
+func stepsView(steps []wizStep, cur int) string {
+	var b strings.Builder
+	for i, s := range steps {
+		n := i + 1
+		var mark, name string
+		switch {
+		case n < cur:
+			mark, name = styleFg(okCol, "✓"), styleFg(muted, s.label)
+		case n == cur:
+			mark, name = styleFg(accent, "▶"), styleFg(accent, s.label)
+		default:
+			mark, name = styleFg(dim, "○"), styleFg(dim, s.label)
+		}
+		line := " " + mark + " " + styleFg(dim, strconv.Itoa(n)+".") + " " + name
+		if s.val != "" {
+			line += "  " + styleFg(muted, s.val)
+		}
+		if s.mutates {
+			line += "  " + styleFg(errCol, "⚠ 會實際寫入")
+		}
+		b.WriteString(line + "\n")
+	}
+	return b.String()
 }
 
 // ---- brand name (blue -> cyan gradient) ----
