@@ -72,20 +72,40 @@ type areasMsg struct {
 }
 
 type workItem struct {
-	id        int
-	title     string
-	typ       string
-	state     string
-	area      string
-	iteration string
-	assigned  string
-	childIDs  []int
+	id          int
+	title       string
+	typ         string
+	state       string
+	area        string
+	iteration   string
+	assigned    string
+	childIDs    []int
+	parentID    int    // Hierarchy-Reverse 目標（綁 Feature 用 parent；0＝無）
+	relatedID   int    // System.LinkTypes.Related 第一個（綁 Release 用 related；0＝無）
+	parentTyp   string // 綁的上層 type（顯示用，延遲載入）
+	parentTitle string // 綁的上層標題（顯示用）
 }
 
-type workItemMsg struct {
-	wi       workItem
-	children []workItem
-	err      error
+// boundParentID 回傳這張單綁的上層：Feature 走 parent、Release 走 related；0＝沒綁。
+func (w workItem) boundParentID() int {
+	if w.parentID > 0 {
+		return w.parentID
+	}
+	return w.relatedID
+}
+
+type workItemMetaMsg struct {
+	wi  workItem
+	err error
+}
+
+// childOneMsg is one streamed child load: rest = sibling ids still to load,
+// parent = the node these children belong to.
+type childOneMsg struct {
+	child  workItem
+	rest   []int
+	parent workItem
+	err    error
 }
 type writtenMsg struct {
 	path string
@@ -362,13 +382,72 @@ func showWorkItem(org string, id int) (workItem, error) {
 		assigned:  raw.Fields.Assigned.DisplayName,
 	}
 	for _, rel := range raw.Relations {
-		if rel.Rel == "System.LinkTypes.Hierarchy-Forward" {
+		switch rel.Rel {
+		case "System.LinkTypes.Hierarchy-Forward":
 			if cid := lastIntSegment(rel.URL); cid > 0 {
 				wi.childIDs = append(wi.childIDs, cid)
+			}
+		case "System.LinkTypes.Hierarchy-Reverse":
+			if pid := lastIntSegment(rel.URL); pid > 0 {
+				wi.parentID = pid
+			}
+		case "System.LinkTypes.Related":
+			if rid := lastIntSegment(rel.URL); rid > 0 && wi.relatedID == 0 {
+				wi.relatedID = rid
 			}
 		}
 	}
 	return wi, nil
+}
+
+type bindParentMsg struct {
+	targetID  int
+	targetTyp string
+	err       error
+}
+
+// bindParentCmd 把 childID 綁到 targetID：查 target 的 type 決定 parent(Feature)/related(Release)。
+func bindParentCmd(org string, childID, targetID int) tea.Cmd {
+	return func() tea.Msg {
+		t, err := showWorkItem(org, targetID)
+		if err != nil {
+			return bindParentMsg{err: err}
+		}
+		var kind string
+		switch {
+		case strings.EqualFold(t.typ, "Feature"):
+			kind = "parent"
+		case strings.EqualFold(t.typ, "Release"):
+			kind = "related"
+		default:
+			return bindParentMsg{err: fmt.Errorf("只能綁到 Feature 或 Release，#%d 是 %s", targetID, t.typ)}
+		}
+		if _, e := run("az", "boards", "work-item", "relation", "add",
+			"--id", strconv.Itoa(childID), "--relation-type", kind,
+			"--target-id", strconv.Itoa(targetID), "--organization", org, "-o", "json"); e != nil {
+			return bindParentMsg{err: e}
+		}
+		return bindParentMsg{targetID: targetID, targetTyp: t.typ}
+	}
+}
+
+type parentInfoMsg struct {
+	ownerID  int
+	parentID int
+	typ      string
+	title    string
+}
+
+// loadParentCmd 查某節點父層的 type/title（延遲載入，供步驟一顯示）。ownerID 用來
+// 比對回來時是否仍是當前節點，避免鑽層後更新到別層。
+func loadParentCmd(org string, ownerID, parentID int) tea.Cmd {
+	return func() tea.Msg {
+		p, err := showWorkItem(org, parentID)
+		if err != nil {
+			return parentInfoMsg{ownerID: ownerID}
+		}
+		return parentInfoMsg{ownerID: ownerID, parentID: parentID, typ: p.typ, title: p.title}
+	}
 }
 
 func lastIntSegment(u string) int {
@@ -380,20 +459,22 @@ func lastIntSegment(u string) int {
 	return n
 }
 
-// fetchWorkItemCmd loads a work item plus its child tasks.
-func fetchWorkItemCmd(org string, id int) tea.Cmd {
+// fetchWorkItemMetaCmd loads just the work item (one call, fast). The Task-layer
+// drill-down (PowerShell Get-Relations-Detail) then runs child-by-child via
+// loadChildCmd so the UI can stream progress instead of freezing on a spinner.
+func fetchWorkItemMetaCmd(org string, id int) tea.Cmd {
 	return func() tea.Msg {
 		wi, err := showWorkItem(org, id)
-		if err != nil {
-			return workItemMsg{err: err}
-		}
-		var kids []workItem
-		for _, cid := range wi.childIDs {
-			if k, e := showWorkItem(org, cid); e == nil {
-				kids = append(kids, k)
-			}
-		}
-		return workItemMsg{wi: wi, children: kids}
+		return workItemMetaMsg{wi: wi, err: err}
+	}
+}
+
+// loadChildCmd loads one child work item. rest = sibling ids still to load;
+// parent = the node these children belong to.
+func loadChildCmd(org string, id int, rest []int, parent workItem) tea.Cmd {
+	return func() tea.Msg {
+		wi, err := showWorkItem(org, id)
+		return childOneMsg{child: wi, rest: rest, parent: parent, err: err}
 	}
 }
 
@@ -443,10 +524,13 @@ func createTasksCmd(org, project string, parentID int, area, iteration string, t
 				failed = append(failed, title)
 				continue
 			}
-			// link the new Task as a child of the parent (non-fatal on failure)
-			run("az", "boards", "work-item", "relation", "add",
-				"--id", strconv.Itoa(parentID), "--relation-type", "child",
-				"--target-id", strconv.Itoa(raw.ID), "--organization", org, "-o", "json")
+			// link the new Task as a child of the parent (non-fatal on failure).
+			// parentID<=0 表示獨立 Task（不綁父單），跳過。
+			if parentID > 0 {
+				run("az", "boards", "work-item", "relation", "add",
+					"--id", strconv.Itoa(parentID), "--relation-type", "child",
+					"--target-id", strconv.Itoa(raw.ID), "--organization", org, "-o", "json")
+			}
 			created = append(created, workItem{id: raw.ID, title: title, typ: "Task", state: "New"})
 		}
 		return taskCreatedMsg{created: created, failed: failed}

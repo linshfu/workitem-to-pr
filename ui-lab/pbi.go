@@ -212,6 +212,48 @@ func (m *model) enterPbi() tea.Cmd {
 	return whoAmICmd() // resolve assignee in the background
 }
 
+// enterPbiForParent 從導航器在某父單（Feature/Release）下建立 PBI：預帶綁定目標、
+// 跳過 pbBind，建完/取消回導航器（navReturn）。
+func (m *model) enterPbiForParent(parent workItem) tea.Cmd {
+	if m.cfg.WorkItemProject == "" || len(m.cfg.Mappings) == 0 {
+		m.errMsg = "config 缺 workItemProject 或專案對應，無法建立 PBI"
+		return nil
+	}
+	m.mode = modePbi
+	m.navReturn = true
+	m.pstep = pbProject
+	m.errMsg = ""
+	m.pKeys = sortedMappingKeys(m.cfg.Mappings)
+	m.pCursor = 0
+	m.pMapKey, m.pAreaPath, m.pTitle, m.pIterPath, m.pUser = "", "", "", "", ""
+	m.pCreatedID, m.pURL = 0, ""
+	m.pBindID, m.pBindType, m.pBindTitle = parent.id, parent.typ, parent.title
+	if strings.EqualFold(parent.typ, "Release") {
+		m.pBindKind = "related"
+	} else {
+		m.pBindKind = "parent"
+	}
+	m.input.SetValue("")
+	m.input.Placeholder = "篩選專案…"
+	return whoAmICmd()
+}
+
+// pbiBackToNav 從 pbi 建立流程回到導航器層視圖，並把剛建/補綁的 PBI 加進可鑽清單。
+func (m model) pbiBackToNav() model {
+	m.navReturn = false
+	m.mode = modeTask
+	m.tstep = tkShow
+	m.loading = false
+	m.errMsg = ""
+	m.input.SetValue("")
+	m.input.Placeholder = ""
+	if m.pCreatedID > 0 {
+		m.drillOthers = append(m.drillOthers, workItem{id: m.pCreatedID, title: m.pTitle, typ: "Product Backlog Item"})
+		m.taskCursor = len(m.drillOthers) - 1
+	}
+	return m
+}
+
 func (m model) pbiFilteredKeys() []string {
 	q := strings.TrimSpace(m.input.Value())
 	var out []string
@@ -352,6 +394,9 @@ func (m model) pbiStepsView() string {
 
 func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "esc" && m.pstep != pbCreating && m.pstep != pbBinding {
+		if m.navReturn {
+			return m.pbiBackToNav(), nil
+		}
 		return m.pbiHome(), nil
 	}
 
@@ -469,18 +514,43 @@ func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case pbDupFound:
+		if m.pBindID > 0 {
+			// 有父單：每張現有 PBI 可補綁到父單，最後一項＝仍要新建
+			n := len(m.pDups) + 1
+			switch key.String() {
+			case "up":
+				m.pDupCursor = (m.pDupCursor - 1 + n) % n
+			case "down":
+				m.pDupCursor = (m.pDupCursor + 1) % n
+			case "enter":
+				if m.pDupCursor < len(m.pDups) {
+					dup := m.pDups[m.pDupCursor]
+					m.pCreatedID = dup.id
+					m.pURL = strings.TrimRight(m.cfg.AzureOrg, "/") + "/" + m.cfg.WorkItemProject + "/_workitems/edit/" + strconv.Itoa(dup.id)
+					m.pstep = pbBinding
+					m.loading = true
+					m.errMsg = ""
+					return m, addRelationCmd(m.cfg.AzureOrg, dup.id, m.pBindKind, m.pBindID)
+				}
+				m.pstep = pbResolve // 仍要新建
+				m.loading = true
+				return m, listIterationsCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject)
+			}
+			return m, nil
+		}
+		// 無父單：仍新建 / 取消
 		switch key.String() {
 		case "up":
 			m.pDupCursor = (m.pDupCursor - 1 + 2) % 2
 		case "down":
 			m.pDupCursor = (m.pDupCursor + 1) % 2
 		case "enter":
-			if m.pDupCursor == 0 { // 仍要新建
+			if m.pDupCursor == 0 {
 				m.pstep = pbResolve
 				m.loading = true
 				return m, listIterationsCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject)
 			}
-			return m.pbiHome(), nil // 取消，去用現有的
+			return m.pbiHome(), nil
 		}
 		return m, nil
 
@@ -523,6 +593,9 @@ func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	case pbDone:
 		if key.String() == "enter" {
+			if m.navReturn {
+				return m.pbiBackToNav(), nil
+			}
 			return m.pbiHome(), nil
 		}
 		return m, nil
@@ -567,15 +640,28 @@ func (m model) viewPbi() string {
 	case pbDupFound:
 		body.WriteString(styleBold(accent, "已有同名 PBI") + "\n\n")
 		body.WriteString(styleFg(muted, "「"+m.pTitle+"」已經存在下列 PBI：") + "\n\n")
-		for _, d := range m.pDups {
-			meta := d.state
-			if d.assignee != "" {
-				meta += " · " + d.assignee
+		if m.pBindID > 0 {
+			var items []string
+			for _, d := range m.pDups {
+				meta := d.state
+				if d.assignee != "" {
+					meta += " · " + d.assignee
+				}
+				items = append(items, "綁 #"+strconv.Itoa(d.id)+" "+d.title+"（"+meta+"）到 "+m.pBindType+" #"+strconv.Itoa(m.pBindID))
 			}
-			body.WriteString("  " + styleFg(accent, "#"+strconv.Itoa(d.id)) + " " + d.title + "  " + styleFg(dim, meta) + "\n")
+			items = append(items, "仍要新建一張")
+			body.WriteString(renderList(items, m.pDupCursor))
+		} else {
+			for _, d := range m.pDups {
+				meta := d.state
+				if d.assignee != "" {
+					meta += " · " + d.assignee
+				}
+				body.WriteString("  " + styleFg(accent, "#"+strconv.Itoa(d.id)) + " " + d.title + "  " + styleFg(dim, meta) + "\n")
+			}
+			body.WriteString("\n")
+			body.WriteString(renderList([]string{"仍要新建一張", "取消（去用上面現有的）"}, m.pDupCursor))
 		}
-		body.WriteString("\n")
-		body.WriteString(renderList([]string{"仍要新建一張", "取消（去用上面現有的）"}, m.pDupCursor))
 	case pbResolve:
 		body.WriteString(styleBold(accent, "建立 PBI") + "\n\n")
 		body.WriteString(m.spin.View() + " " + styleFg(muted, "確認 Iteration…"))

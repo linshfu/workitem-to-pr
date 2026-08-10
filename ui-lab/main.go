@@ -54,6 +54,7 @@ const (
 	tkInput      taskStep = iota // enter work item id
 	tkShow                       // show work item + child tasks (multi-select)
 	tkNewTask                    // enter title(s) for new task(s) under the PBI
+	tkBindParent                 // PBI 沒綁父層時，輸入要綁的 Feature/Release id
 	tkBranch                     // resolve project/repo + confirm branch
 	tkPath                       // no local path -> clone or enter existing
 	tkPathInput                  // input the path / clone target dir
@@ -199,18 +200,22 @@ type model struct {
 	reuseCursor   int
 
 	// config + task flow
-	cfg        config
-	cfgOK      bool
-	tstep      taskStep
-	wi         workItem
-	children   []workItem
-	taskCursor int
+	cfg         config
+	cfgOK       bool
+	tstep       taskStep
+	wi          workItem
+	children    []workItem
+	taskRoute   []workItem
+	drillOthers []workItem
+	taskCursor  int
 
 	// task multi-select + new tasks
 	taskSel    map[int]bool // task id -> selected
 	selOrder   []int        // selection order; [0] = primary (branch naming)
 	newIDs     map[int]bool // which children were newly created (for the label)
 	allTaskIDs []int        // finalized selected ids, carried for the PR to link all
+	navStack   []navFrame   // 導航器：祖先層（供返回上層還原）
+	navReturn  bool         // 從導航器進 pbi 建立流程；建完/取消回導航器而非 home
 
 	// branch step
 	selTask      workItem
@@ -567,17 +572,49 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.pstep = pbDone
 		return m, nil
-	case workItemMsg:
+	case workItemMetaMsg:
 		m.loading = false
 		if msg.err != nil {
 			m.errMsg = "取得工作項失敗:" + msg.err.Error()
 			return m, nil
 		}
-		m.wi, m.children, m.taskCursor, m.errMsg = msg.wi, msg.children, 0, ""
-		if strings.EqualFold(m.wi.typ, "Task") {
-			// the id is itself a Task -> skip child selection, go straight to branch
-			m.allTaskIDs = []int{m.wi.id}
-			return m.toBranch(m.wi)
+		m.navStack, m.taskRoute = nil, nil
+		return m.enterNode(msg.wi)
+	case childOneMsg:
+		if m.mode != modeTask {
+			return m, nil
+		}
+		if msg.err == nil {
+			if strings.EqualFold(msg.child.typ, "Task") {
+				m.children = append(m.children, msg.child)
+			} else {
+				m.drillOthers = append(m.drillOthers, msg.child)
+			}
+		}
+		if len(msg.rest) > 0 {
+			return m, loadChildCmd(m.cfg.AzureOrg, msg.rest[0], msg.rest[1:], msg.parent)
+		}
+		// 這一層載完，停在當前層讓使用者選（Task 多選）或鑽入（非 Task 子單）
+		m.loading = false
+		return m, nil
+	case bindParentMsg:
+		m.loading = false
+		if msg.err != nil {
+			m.errMsg = "綁定失敗:" + msg.err.Error()
+		} else {
+			if strings.EqualFold(msg.targetTyp, "Release") {
+				m.wi.relatedID = msg.targetID // Release 走 related
+			} else {
+				m.wi.parentID = msg.targetID // Feature 走 parent
+			}
+			m.wi.parentTyp = msg.targetTyp // 已綁，顯示在步驟一
+			m.errMsg = ""
+		}
+		m.tstep = tkShow
+		return m, nil
+	case parentInfoMsg:
+		if m.mode == modeTask && m.wi.id == msg.ownerID {
+			m.wi.parentTyp, m.wi.parentTitle = msg.typ, msg.title
 		}
 		return m, nil
 	case taskCreatedMsg:
@@ -866,7 +903,7 @@ func (m model) startTask(idStr string) (tea.Model, tea.Cmd) {
 	m.prID, m.prURL, m.prResult, m.revNote, m.slackMsg = 0, "", "", "", ""
 	m.input.SetValue("")
 	m.input.Placeholder = ""
-	return m, fetchWorkItemCmd(m.cfg.AzureOrg, id)
+	return m, fetchWorkItemMetaCmd(m.cfg.AzureOrg, id)
 }
 
 // enterInit resets wizard state and starts the environment check. Shared by the
@@ -1682,6 +1719,99 @@ func (m *model) toggleTask(id int) {
 	m.selOrder = append(m.selOrder, id)
 }
 
+type navFrame struct {
+	node     workItem
+	children []workItem
+	others   []workItem
+	cursor   int
+	sel      map[int]bool
+	selOrder []int
+	newIDs   map[int]bool
+}
+
+type levelRowKind int
+
+const (
+	rowDrill       levelRowKind = iota // 鑽入非 Task 子單
+	rowToggleTask                      // 多選 Task
+	rowCreateChild                     // 在這層建立下一層單
+	rowDone                            // 完成，繼續（建分支）
+	rowReleaseFlow                     // Release 發版
+	rowBindParent                      // PBI 沒綁父層 -> 綁到 Feature/Release
+)
+
+type levelRow struct {
+	kind levelRowKind
+	wi   workItem
+}
+
+// nextLevelType 回傳當前 type 底下要建立的子單 type（""＝不支援建立）。
+func nextLevelType(typ string) string {
+	switch {
+	case strings.EqualFold(typ, "Feature"), strings.EqualFold(typ, "Release"):
+		return "Product Backlog Item"
+	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"):
+		return "Task"
+	}
+	return ""
+}
+
+func shortType(t string) string {
+	if t == "Product Backlog Item" {
+		return "PBI"
+	}
+	return t
+}
+
+// pushFrame 把當前層打包進 navStack（供返回上層還原）。
+func (m *model) pushFrame() {
+	m.navStack = append(m.navStack, navFrame{
+		node: m.wi, children: m.children, others: m.drillOthers,
+		cursor: m.taskCursor, sel: m.taskSel, selOrder: m.selOrder, newIDs: m.newIDs,
+	})
+}
+
+// popFrame 還原上一層（不 re-fetch）；navStack 空回 false。
+func (m *model) popFrame() bool {
+	if len(m.navStack) == 0 {
+		return false
+	}
+	f := m.navStack[len(m.navStack)-1]
+	m.navStack = m.navStack[:len(m.navStack)-1]
+	m.wi, m.children, m.drillOthers = f.node, f.children, f.others
+	m.taskCursor, m.taskSel, m.selOrder, m.newIDs = f.cursor, f.sel, f.selOrder, f.newIDs
+	if len(m.taskRoute) > 0 {
+		m.taskRoute = m.taskRoute[:len(m.taskRoute)-1]
+	}
+	m.loading = false
+	return true
+}
+
+// enterNode 進入一個節點：依 type 分流（Task→建分支；Feature/PBI→逐一載入子項）。
+func (m model) enterNode(node workItem) (tea.Model, tea.Cmd) {
+	m.wi = node
+	m.children, m.drillOthers, m.taskCursor, m.errMsg = nil, nil, 0, ""
+	m.taskSel, m.selOrder, m.newIDs = map[int]bool{}, nil, map[int]bool{}
+	m.taskRoute = append(m.taskRoute, node)
+	if strings.EqualFold(node.typ, "Task") {
+		m.allTaskIDs = []int{node.id}
+		return m.toBranch(node)
+	}
+	var cmds []tea.Cmd
+	if bid := node.boundParentID(); bid > 0 && node.parentTyp == "" {
+		cmds = append(cmds, loadParentCmd(m.cfg.AzureOrg, node.id, bid))
+	}
+	if len(node.childIDs) > 0 {
+		m.loading = true
+		cmds = append(cmds, loadChildCmd(m.cfg.AzureOrg, node.childIDs[0], node.childIDs[1:], node))
+	}
+	if len(cmds) == 0 {
+		m.loading = false
+		return m, nil
+	}
+	return m, tea.Batch(cmds...)
+}
+
 func (m model) taskByID(id int) workItem {
 	for _, c := range m.children {
 		if c.id == id {
@@ -1699,24 +1829,66 @@ func joinTaskIDs(ids []int) string {
 	return strings.Join(parts, " ")
 }
 
-// taskRows renders the child tasks (with checkboxes) plus the two action rows.
-func (m model) taskRows() []string {
-	var rows []string
+// levelRows 組出當前層的可選列：非 Task 子單(可鑽) → Task 子項(可多選) → 動作列。
+func (m model) levelRows() []levelRow {
+	var rows []levelRow
+	for _, o := range m.drillOthers {
+		rows = append(rows, levelRow{kind: rowDrill, wi: o})
+	}
 	for _, c := range m.children {
+		rows = append(rows, levelRow{kind: rowToggleTask, wi: c})
+	}
+	if strings.EqualFold(m.wi.typ, "Release") {
+		rows = append(rows, levelRow{kind: rowReleaseFlow})
+	}
+	if nextLevelType(m.wi.typ) != "" {
+		rows = append(rows, levelRow{kind: rowCreateChild})
+	}
+	if strings.EqualFold(m.wi.typ, "Product Backlog Item") && m.wi.boundParentID() == 0 {
+		rows = append(rows, levelRow{kind: rowBindParent})
+	}
+	if len(m.children) > 0 {
+		rows = append(rows, levelRow{kind: rowDone})
+	}
+	return rows
+}
+
+func (m model) levelRowLabel(r levelRow) string {
+	switch r.kind {
+	case rowDrill:
+		return "↳ [" + r.wi.typ + "] #" + strconv.Itoa(r.wi.id) + " " + r.wi.title
+	case rowToggleTask:
 		mark := "[ ]"
-		if m.taskSel[c.id] {
+		if m.taskSel[r.wi.id] {
 			mark = "[x]"
 		}
-		label := mark + " #" + strconv.Itoa(c.id) + " " + c.title
-		if c.state != "" {
-			label += " (" + c.state + ")"
+		s := mark + " #" + strconv.Itoa(r.wi.id) + " " + r.wi.title
+		if r.wi.state != "" {
+			s += " (" + r.wi.state + ")"
 		}
-		if m.newIDs[c.id] {
-			label += " ★新"
+		if m.newIDs[r.wi.id] {
+			s += " ★新"
 		}
-		rows = append(rows, label)
+		return s
+	case rowCreateChild:
+		return "＋ 建立新 " + shortType(nextLevelType(m.wi.typ))
+	case rowDone:
+		return "→ 完成，繼續"
+	case rowReleaseFlow:
+		return "🚀 發版（跑 release 流程）"
+	case rowBindParent:
+		return "🔗 這張還沒綁父層，綁到 Feature / Release"
 	}
-	return append(rows, "＋ 建立新 Task", "→ 完成，繼續")
+	return ""
+}
+
+func (m model) levelRowLabels() []string {
+	rows := m.levelRows()
+	out := make([]string, len(rows))
+	for i, r := range rows {
+		out[i] = m.levelRowLabel(r)
+	}
+	return out
 }
 
 // toBranch resolves the project/repo for a Task and moves to the branch step.
@@ -1743,11 +1915,16 @@ func (m model) toBranch(t workItem) (tea.Model, tea.Cmd) {
 
 func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "esc" {
-		if m.tstep == tkNewTask && !m.loading {
-			// cancel new-task entry -> back to the selection list, keep selections
+		if (m.tstep == tkNewTask || m.tstep == tkBindParent) && !m.loading {
+			// cancel new-task / bind entry -> back to the selection list
 			m.tstep = tkShow
 			m.errMsg = ""
 			m.input.SetValue("")
+			return m, nil
+		}
+		if m.tstep == tkShow && !m.loading && len(m.navStack) > 0 {
+			m.popFrame() // 返回上一層
+			m.errMsg = ""
 			return m, nil
 		}
 		m.mode = modeHome
@@ -1761,7 +1938,19 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch m.tstep {
 	case tkInput:
 		if key.String() == "enter" {
-			return m.startTask(m.input.Value())
+			raw := strings.TrimSpace(m.input.Value())
+			if raw == "" {
+				// 留空 -> 建立獨立 Task（不綁父單）
+				m.wi = workItem{}
+				m.children, m.drillOthers, m.taskRoute, m.navStack = nil, nil, nil, nil
+				m.taskSel, m.selOrder, m.newIDs = map[int]bool{}, nil, map[int]bool{}
+				m.tstep = tkNewTask
+				m.errMsg = ""
+				m.input.SetValue("")
+				m.input.Placeholder = "獨立 Task 標題（多張用逗號分隔）"
+				return m, nil
+			}
+			return m.startTask(raw)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
@@ -1771,31 +1960,52 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.loading {
 			return m, nil
 		}
-		rows := m.taskRows()
+		rows := m.levelRows()
 		n := len(rows)
-		newIdx := len(m.children)    // "＋ 建立新 Task"
-		goIdx := len(m.children) + 1 // "→ 完成，繼續"
+		if n == 0 {
+			return m, nil
+		}
 		switch key.String() {
 		case "up":
 			m.taskCursor = (m.taskCursor - 1 + n) % n
 		case "down":
 			m.taskCursor = (m.taskCursor + 1) % n
-		case " ":
-			if m.taskCursor < len(m.children) {
-				m.toggleTask(m.children[m.taskCursor].id)
-			}
 		case "enter":
-			switch {
-			case m.taskCursor < len(m.children):
-				m.toggleTask(m.children[m.taskCursor].id)
-			case m.taskCursor == newIdx:
-				m.tstep = tkNewTask
+			if m.taskCursor >= n {
+				return m, nil
+			}
+			switch r := rows[m.taskCursor]; r.kind {
+			case rowToggleTask:
+				m.toggleTask(r.wi.id)
+			case rowDrill:
+				m.pushFrame()
+				return m.enterNode(r.wi)
+			case rowCreateChild:
+				if nextLevelType(m.wi.typ) == "Task" {
+					m.tstep = tkNewTask
+					m.errMsg = ""
+					m.input.SetValue("")
+					m.input.Placeholder = "Task 標題（多張用逗號分隔）"
+				} else { // 在 Feature/Release 下建 PBI
+					cmd := m.enterPbiForParent(m.wi)
+					return m, cmd
+				}
+			case rowReleaseFlow:
+				if len(releaseCandidateKeys(m.cfg)) == 0 {
+					m.errMsg = "沒有含本機路徑(localPath)的專案；請先設定專案本機路徑再發版"
+					return m, nil
+				}
+				cmd := m.enterRelease()
+				return m, cmd
+			case rowBindParent:
+				m.tstep = tkBindParent
 				m.errMsg = ""
 				m.input.SetValue("")
-				m.input.Placeholder = "Task 標題（多張用逗號分隔）"
-			case m.taskCursor == goIdx:
+				m.input.Placeholder = "要綁的 Feature / Release ID"
+				return m, nil
+			case rowDone:
 				if len(m.selOrder) == 0 {
-					m.errMsg = "先用 space 選至少一張 Task，或建立新的"
+					m.errMsg = "先用 ⏎ 選至少一張 Task，或選「建立新…」"
 					return m, nil
 				}
 				m.allTaskIDs = append([]int(nil), m.selOrder...)
@@ -1822,6 +2032,24 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loading = true
 			m.errMsg = ""
 			return m, createTasksCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject, m.wi.id, m.wi.area, m.wi.iteration, titles)
+		}
+		var cmd tea.Cmd
+		m.input, cmd = m.input.Update(key)
+		return m, cmd
+
+	case tkBindParent:
+		if m.loading {
+			return m, nil
+		}
+		if key.String() == "enter" {
+			id, err := strconv.Atoi(strings.TrimSpace(m.input.Value()))
+			if err != nil || id <= 0 {
+				m.errMsg = "請輸入數字 ID"
+				return m, nil
+			}
+			m.loading = true
+			m.errMsg = ""
+			return m, bindParentCmd(m.cfg.AzureOrg, m.wi.id, id)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
@@ -2634,10 +2862,8 @@ func (m model) taskPhase() int {
 		return 4
 	case tkCommit:
 		return 5
-	case tkReviewer:
+	default: // tkReviewer, tkPRCreating, tkPRDone（選完 reviewer 就直接建 PR）
 		return 6
-	default: // tkPRCreating, tkPRDone
-		return 7
 	}
 }
 
@@ -2647,6 +2873,16 @@ func (m model) taskStepsView() string {
 	wiVal := ""
 	if m.wi.id > 0 {
 		wiVal = "#" + strconv.Itoa(m.wi.id)
+		if m.wi.typ != "" {
+			wiVal = "[" + shortType(m.wi.typ) + "] " + wiVal
+		}
+		if bid := m.wi.boundParentID(); bid > 0 {
+			pt := m.wi.parentTyp
+			if pt == "" {
+				pt = "上層"
+			}
+			wiVal += "  ·  " + shortType(pt) + " #" + strconv.Itoa(bid)
+		}
 	}
 	taskVal := ""
 	if n := len(m.allTaskIDs); n > 0 {
@@ -2668,8 +2904,7 @@ func (m model) taskStepsView() string {
 		{label: "建分支", val: branchVal, mutates: makesBranch},
 		{label: "本機路徑", val: m.localPath},
 		{label: "確認 commit"},
-		{label: "選 reviewer"},
-		{label: "建 PR＋通知", mutates: true},
+		{label: "選 reviewer → 建 PR＋通知", mutates: true},
 	}, m.taskPhase())
 }
 
@@ -2679,23 +2914,45 @@ func (m model) viewTask() string {
 	switch m.tstep {
 	case tkInput:
 		body.WriteString(styleBold(accent, "處理工作項") + "\n\n")
-		body.WriteString(styleFg(muted, "輸入工作項 ID。"))
+		body.WriteString(styleFg(muted, "輸入工作項 ID（Task / PBI / Feature / Release 都可）。") + "\n")
+		body.WriteString(styleFg(muted, "留空直接 Enter ＝ 建立獨立 Task（不綁父單）。"))
 
 	case tkShow:
-		if m.loading {
+		if m.loading && len(m.taskRoute) == 0 {
 			body.WriteString(styleBold(accent, "處理工作項") + "\n\n")
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "讀取工作項…"))
 		} else {
-			w := m.wi
-			body.WriteString(styleFg(muted, "["+w.typ+"] ") + styleBold(accent, "#"+strconv.Itoa(w.id)) + " " + w.title + "\n")
-			meta := "狀態 " + w.state
-			if w.area != "" {
-				meta += "   Area " + w.area
+			// 從輸入單鑽到 Task 層的路徑（Feature → PBI → …）
+			for i, r := range m.taskRoute {
+				indent := i
+				if indent > 4 { // 深層麵包屑縮排封頂，避免爆版
+					indent = 4
+				}
+				line := strings.Repeat("  ", indent)
+				if i > 0 {
+					line += "↳ "
+				}
+				line += styleFg(muted, "["+shortType(r.typ)+"] ") + styleFg(dim, "#"+strconv.Itoa(r.id)+" ") + r.title
+				body.WriteString(line + "\n")
 			}
-			body.WriteString(styleFg(muted, meta) + "\n\n")
-			body.WriteString(renderList(m.taskRows(), m.taskCursor))
-			if n := len(m.selOrder); n > 0 {
-				body.WriteString("\n\n" + styleFg(okCol, fmt.Sprintf("已選 %d 張，主要 #%d（分支命名）", n, m.selOrder[0])))
+			body.WriteString("\n")
+			if m.loading {
+				// 逐條列出已載入的子項（Task 與可鑽入的子單）
+				for _, c := range m.children {
+					body.WriteString("  " + styleFg(muted, "#"+strconv.Itoa(c.id)+" "+c.title) + "\n")
+				}
+				for _, o := range m.drillOthers {
+					body.WriteString("  " + styleFg(dim, "↳ ["+o.typ+"] #"+strconv.Itoa(o.id)+" "+o.title) + "\n")
+				}
+				body.WriteString(m.spin.View() + " " + styleFg(muted, fmt.Sprintf("載入子項…（Task %d／可鑽 %d）", len(m.children), len(m.drillOthers))))
+			} else {
+				if len(m.children) == 0 && len(m.drillOthers) == 0 {
+					body.WriteString(styleFg(errCol, "沒有可處理的子項") + styleFg(muted, "，可在 #"+strconv.Itoa(m.wi.id)+" 下建立：") + "\n\n")
+				}
+				body.WriteString(renderList(m.levelRowLabels(), m.taskCursor))
+				if n := len(m.selOrder); n > 0 {
+					body.WriteString("\n\n" + styleFg(okCol, fmt.Sprintf("已選 %d 張，主要 #%d（分支命名）", n, m.selOrder[0])))
+				}
 			}
 		}
 
@@ -2703,6 +2960,9 @@ func (m model) viewTask() string {
 		body.WriteString(styleBold(accent, "建立新 Task") + "\n\n")
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "建立中…"))
+		} else if m.wi.id == 0 {
+			body.WriteString(styleFg(muted, "建立獨立 Task（不綁父單）、指派給自己。") + "\n")
+			body.WriteString(styleFg(muted, "一次多張用逗號分隔，例：A,B"))
 		} else {
 			body.WriteString(styleFg(muted, "父項 ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n")
 			if m.wi.area != "" {
@@ -2710,6 +2970,16 @@ func (m model) viewTask() string {
 			}
 			body.WriteString("\n" + styleFg(muted, "會自動帶父項的 Area/Iteration、指派給自己。"))
 			body.WriteString("\n" + styleFg(muted, "一次多張用逗號分隔，例：A,B"))
+		}
+
+	case tkBindParent:
+		body.WriteString(styleBold(accent, "綁定父層") + "\n\n")
+		body.WriteString(styleFg(muted, "PBI ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n\n")
+		if m.loading {
+			body.WriteString(m.spin.View() + " " + styleFg(muted, "綁定中…"))
+		} else {
+			body.WriteString(styleFg(muted, "輸入要綁的單 ID：Feature 用 parent、Release 用 related 綁。") + "\n\n")
+			body.WriteString(styleFg(errCol, "⚠ 按 Enter 會實際綁定（寫入 Azure）"))
 		}
 
 	case tkBranch:
@@ -2819,7 +3089,7 @@ func (m model) viewTask() string {
 	}
 
 	content := strings.TrimRight(body.String(), "\n")
-	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask {
+	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask || m.tstep == tkBindParent {
 		content = m.input.View() + "\n\n" + content
 	}
 	box := lipgloss.NewStyle().
@@ -2836,11 +3106,16 @@ func (m model) viewTask() string {
 func (m model) taskHint() string {
 	switch m.tstep {
 	case tkInput:
-		return "⏎ 讀取   esc 取消"
+		return "⏎ 讀取／建獨立 Task   esc 取消"
 	case tkShow:
-		return "↑↓ 移動   space 選取   ⏎ 建立/繼續   esc 取消"
+		if len(m.navStack) > 0 {
+			return "↑↓ 移動   ⏎ 選取／鑽入／完成   esc 返回上層"
+		}
+		return "↑↓ 移動   ⏎ 選取／鑽入／完成   esc 取消"
 	case tkNewTask:
 		return "⏎ 建立   esc 返回"
+	case tkBindParent:
+		return "⏎ 綁定   esc 返回"
 	case tkBranch:
 		return "⏎ 建立分支   esc 取消"
 	case tkPath:
