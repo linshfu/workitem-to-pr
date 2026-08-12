@@ -103,3 +103,28 @@ func padRight(s string, n int) string {
 	}
 	return s + strings.Repeat(" ", n-len(s))
 }
+
+// wrapRunes 把字串折成每行顯示寬度不超過 w 的多行（中文字寬 2，用 lipgloss.Width 計算）。
+// 空字串回傳 nil，呼叫端可直接 range 而不必先判空。
+func wrapRunes(s string, w int) []string {
+	if strings.TrimSpace(s) == "" || w <= 0 {
+		return nil
+	}
+	var lines []string
+	var cur strings.Builder
+	curW := 0
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if curW+rw > w && cur.Len() > 0 {
+			lines = append(lines, cur.String())
+			cur.Reset()
+			curW = 0
+		}
+		cur.WriteRune(r)
+		curW += rw
+	}
+	if cur.Len() > 0 {
+		lines = append(lines, cur.String())
+	}
+	return lines
+}

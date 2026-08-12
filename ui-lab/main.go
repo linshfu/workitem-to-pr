@@ -2019,7 +2019,7 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 					m.tstep = tkNewTask
 					m.errMsg = ""
 					m.input.SetValue("")
-					m.input.Placeholder = "Task 標題（多張用逗號分隔）"
+					m.input.Placeholder = ""
 				} else { // 在 Feature/Release 下建 PBI
 					cmd := m.enterPbiForParent(m.wi)
 					return m, cmd
@@ -2061,7 +2061,12 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				}
 			}
 			if len(titles) == 0 {
-				return m, nil
+				// 留空＝沿用父項標題（同 PowerShell 版預設）；獨立 Task 沒有父項可沿用
+				if m.wi.id == 0 || strings.TrimSpace(m.wi.title) == "" {
+					m.errMsg = "請輸入 Task 標題"
+					return m, nil
+				}
+				titles = []string{strings.TrimSpace(m.wi.title)}
 			}
 			m.loading = true
 			m.errMsg = ""
@@ -2458,18 +2463,35 @@ func (m model) viewHelp() string {
 	var b strings.Builder
 	b.WriteString(styleBold(accent, "指令說明") + "\n\n")
 	rows := []struct{ name, desc, note string }{
-		{"/task <id>", "工作項導航：依 type 逐層往下 —— Feature / Release 選或建子 PBI（自動綁上層）、PBI 選或建子 Task（可多選）、Task → 建分支 → 建 PR（連結全部）→ Slack 通知 reviewer", "例：/task 35744，或直接打數字 35744；不帶 id 可建獨立 Task"},
-		{"/pbi", "建立 PBI：可先綁上層（Release 用 related、Feature 用 parent）→ 選專案 → 標題（同名會查重，可改綁現有那張）→ 自動帶 Area、當月 Iteration、指派給自己", ""},
+		{"/task <id>", "工作項導航：依 type 逐層往下 —— Feature / Release 選或建子 PBI（自動綁上層）、PBI 選或建子 Task（可多選）、Task → 建分支 → 建 PR → Slack 通知", "直接打數字 35744 等同 /task 35744；不帶 id 可建獨立 Task"},
+		{"/pbi", "建立 PBI：可先綁上層（Release 用 related、Feature 用 parent）→ 選專案 → 標題 → 自動帶 Area、當月 Iteration、指派給自己", "同名會查重，可改綁現有那張"},
 		{"/init", "初始化精靈：檢查環境、az 探索、產生 config，可選設定 Slack", "重跑會進「已有設定」選單，只改你要改的（不清掉舊設定）"},
 		{"/update", "更新到最新版（下載並自我替換）", ""},
-		{"/release", "跑 release.sh，成功後開 master / develop PR + Slack", ""},
-		{"/hotfix", "選專案 → 版號 → 更新 master 開 hotfix/vX.Y.Z → 等你 push 修正 commit → 改版號 → 開 master / develop PR + Slack", "例：/hotfix（版號在流程中輸入）"},
+		{"/release", "選專案 → 版號 → 跑 release.sh → 開 master / develop PR + Slack", ""},
+		{"/hotfix", "選專案 → 版號 → 開 hotfix/vX.Y.Z → 等你 push 修正 → 改版號 → 開 master / develop PR + Slack", ""},
 		{"/help", "這個畫面", ""},
 	}
+	const nameW = 12
+	// 依終端寬度折行：扣掉外框(2)、左右 padding(4) 與指令欄寬，避免長描述被切掉
+	w := m.width
+	if w <= 0 {
+		w = 84 // 還沒收到 WindowSizeMsg，用與 commandBar 相同的預設寬度
+	}
+	descW := w - 6 - nameW
+	if descW < 30 {
+		descW = 30
+	}
+	indent := strings.Repeat(" ", nameW)
 	for _, r := range rows {
-		b.WriteString(styleBold(accent, padRight(r.name, 12)) + styleFg(muted, r.desc) + "\n")
-		if r.note != "" {
-			b.WriteString("            " + styleFg(dim, r.note) + "\n")
+		for i, line := range wrapRunes(r.desc, descW) {
+			if i == 0 {
+				b.WriteString(styleBold(accent, padRight(r.name, nameW)) + styleFg(muted, line) + "\n")
+			} else {
+				b.WriteString(indent + styleFg(muted, line) + "\n")
+			}
+		}
+		for _, line := range wrapRunes(r.note, descW) {
+			b.WriteString(indent + styleFg(dim, line) + "\n")
 		}
 	}
 	b.WriteString("\n" + styleFg(muted, "小技巧：打 / 模糊搜尋指令、Tab 補全；直接打數字＝/task <id>。"))
@@ -2907,19 +2929,22 @@ func (m model) taskPhase() int {
 // taskStepsView 列出 /task 的所有步驟。會實際寫入的步驟（建新 Task、建分支、建 PR）標 ⚠；
 // 純選現有 Task 或重用既有分支時，該步就不算寫入。
 func (m model) taskStepsView() string {
+	// 上層在前、自己在後，用 › 表示往下一層，讓階層一眼看得出來：
+	//   [Release] #35867 › [PBI] #36030
 	wiVal := ""
 	if m.wi.id > 0 {
-		wiVal = "#" + strconv.Itoa(m.wi.id)
-		if m.wi.typ != "" {
-			wiVal = "[" + shortType(m.wi.typ) + "] " + wiVal
-		}
 		if bid := m.wi.boundParentID(); bid > 0 {
 			pt := m.wi.parentTyp
 			if pt == "" {
 				pt = "上層"
 			}
-			wiVal += "  ·  " + shortType(pt) + " #" + strconv.Itoa(bid)
+			wiVal = "[" + shortType(pt) + "] #" + strconv.Itoa(bid) + " › "
 		}
+		typ := m.wi.typ
+		if typ == "" {
+			typ = "?"
+		}
+		wiVal += "[" + shortType(typ) + "] #" + strconv.Itoa(m.wi.id)
 	}
 	taskVal := ""
 	if n := len(m.allTaskIDs); n > 0 {
@@ -3001,12 +3026,18 @@ func (m model) viewTask() string {
 			body.WriteString(styleFg(muted, "建立獨立 Task（不綁父單）、指派給自己。") + "\n")
 			body.WriteString(styleFg(muted, "一次多張用逗號分隔，例：A,B"))
 		} else {
-			body.WriteString(styleFg(muted, "父項 ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n")
-			if m.wi.area != "" {
-				body.WriteString(styleFg(muted, "Area ") + m.wi.area + "\n")
+			ptag := "?"
+			if m.wi.typ != "" {
+				ptag = shortType(m.wi.typ)
 			}
-			body.WriteString("\n" + styleFg(muted, "會自動帶父項的 Area/Iteration、指派給自己。"))
-			body.WriteString("\n" + styleFg(muted, "一次多張用逗號分隔，例：A,B"))
+			body.WriteString(styleFg(muted, "父項 ") + styleFg(dim, "["+ptag+"]") + " #" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n")
+			if m.wi.area != "" {
+				body.WriteString(styleFg(muted, "Area      ") + m.wi.area + "\n")
+			}
+			if m.wi.iteration != "" {
+				body.WriteString(styleFg(muted, "Iteration ") + m.wi.iteration + "\n")
+			}
+			body.WriteString("\n" + styleFg(muted, "自動帶父項的 Area / Iteration，指派給自己。留空沿用父項標題，多張用逗號分隔（A,B）。"))
 		}
 
 	case tkBindParent:
@@ -3126,8 +3157,9 @@ func (m model) viewTask() string {
 	}
 
 	content := strings.TrimRight(body.String(), "\n")
+	// 輸入框放在說明之後：先讀「這步在做什麼」，再動手打字
 	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask || m.tstep == tkBindParent {
-		content = m.input.View() + "\n\n" + content
+		content += "\n\n" + m.input.View()
 	}
 	box := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
