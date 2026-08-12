@@ -27,8 +27,8 @@ type command struct{ name, desc string }
 
 var commands = []command{
 	{"/init", "初始化精靈:環境檢查、az 探索、產生 config"},
-	{"/task", "處理工作項:建分支、建 PR、Slack 通知 reviewer"},
-	{"/pbi", "建立 PBI(自動帶 Area / Iteration / 指派自己)"},
+	{"/task", "工作項導航:依 type 逐層往下,到 Task 建分支、建 PR、Slack 通知"},
+	{"/pbi", "建立 PBI(可綁上層、自動帶 Area / Iteration / 指派自己)"},
 	{"/release", "建立 Release PR(目標 master 與 develop)"},
 	{"/hotfix", "Hotfix:開 hotfix 分支、改版號、回 PR"},
 	{"/update", "更新到最新版(下載並自我替換)"},
@@ -46,6 +46,7 @@ const (
 	modePbi
 	modeHelp
 	modeRelease
+	modeHotfix
 )
 
 type taskStep int
@@ -255,6 +256,21 @@ type model struct {
 	rlMasterURL  string
 	rlDevelopURL string
 	rlPRResult   string
+
+	// hotfix
+	hfStep       hotfixStep
+	hfKeys       []string
+	hfCursor     int
+	hfMapKey     string
+	hfMapping    mappingCfg
+	hfPath       string
+	hfVersion    string
+	hfBranch     string
+	hfReused     bool
+	hfCommits    string
+	hfMasterURL  string
+	hfDevelopURL string
+	hfPRResult   string
 }
 
 func initialModel() model {
@@ -684,6 +700,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.mode == modeRelease {
 			return m.onReleaseSlackDone(msg)
 		}
+		if m.mode == modeHotfix {
+			return m.onHotfixSlackDone(msg)
+		}
 		m.loading = false
 		if msg.err != nil {
 			m.slackMsg = "Slack 通知失敗:" + msg.err.Error()
@@ -695,7 +714,16 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case releaseRanMsg:
 		return m.onReleaseRan(msg)
 	case releasePRsMsg:
+		if m.mode == modeHotfix {
+			return m.onHotfixPRs(msg)
+		}
 		return m.onReleasePRs(msg)
+	case hotfixBranchMsg:
+		return m.onHotfixBranched(msg)
+	case hotfixCommitMsg:
+		return m.onHotfixCommits(msg)
+	case hotfixBumpMsg:
+		return m.onHotfixBumped(msg)
 	case refsMsg:
 		m.loading = false
 		if msg.err != nil {
@@ -812,6 +840,9 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.mode == modeRelease {
 			return m.updateRelease(msg)
+		}
+		if m.mode == modeHotfix {
+			return m.updateHotfix(msg)
 		}
 		if m.mode == modeHelp {
 			switch msg.String() {
@@ -1016,6 +1047,9 @@ func (m model) launch(name, arg string) (tea.Model, tea.Cmd) {
 
 	case "/release":
 		return m, m.enterRelease()
+
+	case "/hotfix":
+		return m, m.enterHotfix()
 
 	case "/help":
 		m.mode = modeHelp
@@ -2374,6 +2408,9 @@ func (m model) View() string {
 	if m.mode == modeRelease {
 		return m.viewRelease()
 	}
+	if m.mode == modeHotfix {
+		return m.viewHotfix()
+	}
 	if m.mode == modeHelp {
 		return m.viewHelp()
 	}
@@ -2421,12 +2458,12 @@ func (m model) viewHelp() string {
 	var b strings.Builder
 	b.WriteString(styleBold(accent, "指令說明") + "\n\n")
 	rows := []struct{ name, desc, note string }{
-		{"/task <id>", "處理工作項：選/建 Task（可多選）→ 建分支 → 建 PR（連結全部）→ Slack 通知 reviewer", "例：/task 35744，或直接打數字 35744"},
-		{"/pbi", "建立 PBI：選專案 → 標題 → 自動帶 Area、當月 Iteration、指派給自己", ""},
+		{"/task <id>", "工作項導航：依 type 逐層往下 —— Feature / Release 選或建子 PBI（自動綁上層）、PBI 選或建子 Task（可多選）、Task → 建分支 → 建 PR（連結全部）→ Slack 通知 reviewer", "例：/task 35744，或直接打數字 35744；不帶 id 可建獨立 Task"},
+		{"/pbi", "建立 PBI：可先綁上層（Release 用 related、Feature 用 parent）→ 選專案 → 標題（同名會查重，可改綁現有那張）→ 自動帶 Area、當月 Iteration、指派給自己", ""},
 		{"/init", "初始化精靈：檢查環境、az 探索、產生 config，可選設定 Slack", "重跑會進「已有設定」選單，只改你要改的（不清掉舊設定）"},
 		{"/update", "更新到最新版（下載並自我替換）", ""},
 		{"/release", "跑 release.sh，成功後開 master / develop PR + Slack", ""},
-		{"/hotfix", "Hotfix 流程", "（規劃中）"},
+		{"/hotfix", "選專案 → 版號 → 更新 master 開 hotfix/vX.Y.Z → 等你 push 修正 commit → 改版號 → 開 master / develop PR + Slack", "例：/hotfix（版號在流程中輸入）"},
 		{"/help", "這個畫面", ""},
 	}
 	for _, r := range rows {

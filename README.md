@@ -44,12 +44,13 @@ vl            # 之後就是首頁，輸入 /task 35015 開始跑工作項流程
 
 | 指令 | 說明 |
 |------|------|
-| `/task <id>` | 處理工作項：選/建 Task（可多選）→ 建分支 → 建 PR（`--work-items` 連結全部、transition、刪來源分支、必要 reviewer + auto-complete）→ Slack 通知。直接打數字 `35744` 等同 `/task 35744` |
-| `/pbi` | 建立 PBI：選專案 → 標題 → 自動帶 Area、當年當月 Iteration、指派給自己 |
+| `/task <id>` | 統一導航器：輸入任何工作項，依 type 逐層往下——**Feature / Release** 選現有子單或建新 PBI（自動綁 parent / related）、**PBI** 選/建子 Task（可多選）、**Task** → 建分支 → 建 PR（`--work-items` 連結全部、transition、刪來源分支、必要 reviewer + auto-complete）→ Slack 通知。空 id 可建獨立 Task；直接打數字 `35744` 等同 `/task 35744` |
+| `/pbi` | 建立 PBI：可先綁上層（Release 用 `related`、Feature 用 `parent`）→ 選專案 → 標題（同名會查重，可改綁現有那張）→ 自動帶 Area、當年當月 Iteration、指派給自己。留空不綁＝建獨立 PBI |
 | `/init` | 初始化精靈：環境檢查、az 探索組織/專案/Area、產生 `config.json`；可選設定 Slack（貼 app manifest → 選/建頻道 → 依團隊 email 自動邀人）。**重跑會進「已有設定」選單**，只改你要改的、不清掉舊設定與本機路徑 |
 | `/update` | 連 GitHub 查最新 Release，有新版就下載並自我替換 |
 | `/help` | 指令說明 |
-| `/release`、`/hotfix` | 規劃中 |
+| `/release` | 選專案 → 版號 → 跑 `release.sh`（成功才繼續）→ 開 master / develop PR + Slack |
+| `/hotfix` | 選專案 → 版號 → 更新 master 開 `hotfix/vX.Y.Z` 並 push → 等你 push 修正 commit → 改版號 commit → 開 master / develop PR + Slack |
 
 設定檔在 `%AppData%\very-lazy\config.json`；Slack token 在同目錄 `config.local.json`（都不進 git）。
 
