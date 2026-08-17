@@ -206,7 +206,7 @@ func (m *model) enterPbi() tea.Cmd {
 	m.pCursor = 0
 	m.pMapKey, m.pAreaPath, m.pTitle, m.pIterPath, m.pUser = "", "", "", "", ""
 	m.pCreatedID, m.pURL = 0, ""
-	m.pBindID, m.pBindKind, m.pBindType, m.pBindTitle = 0, "", "", ""
+	m.pBindID, m.pBindKind, m.pBindType, m.pBindTitle, m.pBindOK = 0, "", "", "", false
 	m.input.SetValue("")
 	m.input.Placeholder = "要綁的單 ID(可留空直接 Enter 跳過)"
 	return whoAmICmd() // resolve assignee in the background
@@ -227,7 +227,7 @@ func (m *model) enterPbiForParent(parent workItem) tea.Cmd {
 	m.pCursor = 0
 	m.pMapKey, m.pAreaPath, m.pTitle, m.pIterPath, m.pUser = "", "", "", "", ""
 	m.pCreatedID, m.pURL = 0, ""
-	m.pBindID, m.pBindType, m.pBindTitle = parent.id, parent.typ, parent.title
+	m.pBindID, m.pBindType, m.pBindTitle, m.pBindOK = parent.id, parent.typ, parent.title, false
 	if strings.EqualFold(parent.typ, "Release") {
 		m.pBindKind = "related"
 	} else {
@@ -248,7 +248,21 @@ func (m model) pbiBackToNav() model {
 	m.input.SetValue("")
 	m.input.Placeholder = ""
 	if m.pCreatedID > 0 {
-		m.drillOthers = append(m.drillOthers, workItem{id: m.pCreatedID, title: m.pTitle, typ: "Product Backlog Item"})
+		// 要帶上剛綁好的父層與 Area/Iteration：少了父層，導航器會誤判「這張沒綁父層」
+		// 而多跳一個綁定提示；少了 Area/Iteration，在這張底下建 Task 就沒東西可繼承。
+		nw := workItem{
+			id: m.pCreatedID, title: m.pTitle, typ: "Product Backlog Item",
+			area: m.pAreaPath, iteration: m.pIterPath,
+		}
+		if m.pBindID > 0 && m.pBindOK {
+			if m.pBindKind == "related" {
+				nw.relatedID = m.pBindID // Release 走 related
+			} else {
+				nw.parentID = m.pBindID // Feature 走 parent
+			}
+			nw.parentTyp, nw.parentTitle = m.pBindType, m.pBindTitle
+		}
+		m.drillOthers = append(m.drillOthers, nw)
 		m.taskCursor = len(m.drillOthers) - 1
 	}
 	return m

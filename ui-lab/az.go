@@ -406,21 +406,20 @@ type bindParentMsg struct {
 	err       error
 }
 
-// bindParentCmd 把 childID 綁到 targetID：查 target 的 type 決定 parent(Feature)/related(Release)。
+// bindParentCmd 把 childID 綁到 targetID：查 target 的 type 決定 parent/related。
+// Release 不在階層裡，用 related 綁；其餘一律 parent，合不合法交給 Azure 判。
 func bindParentCmd(org string, childID, targetID int) tea.Cmd {
 	return func() tea.Msg {
+		if childID == targetID {
+			return bindParentMsg{err: fmt.Errorf("不能綁自己 (#%d)", childID)}
+		}
 		t, err := showWorkItem(org, targetID)
 		if err != nil {
 			return bindParentMsg{err: err}
 		}
-		var kind string
-		switch {
-		case strings.EqualFold(t.typ, "Feature"):
-			kind = "parent"
-		case strings.EqualFold(t.typ, "Release"):
+		kind := "parent"
+		if strings.EqualFold(t.typ, "Release") {
 			kind = "related"
-		default:
-			return bindParentMsg{err: fmt.Errorf("只能綁到 Feature 或 Release，#%d 是 %s", targetID, t.typ)}
 		}
 		if _, e := run("az", "boards", "work-item", "relation", "add",
 			"--id", strconv.Itoa(childID), "--relation-type", kind,

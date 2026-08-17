@@ -52,17 +52,18 @@ const (
 type taskStep int
 
 const (
-	tkInput      taskStep = iota // enter work item id
-	tkShow                       // show work item + child tasks (multi-select)
-	tkNewTask                    // enter title(s) for new task(s) under the PBI
-	tkBindParent                 // PBI 沒綁父層時，輸入要綁的 Feature/Release id
-	tkBranch                     // resolve project/repo + confirm branch
-	tkPath                       // no local path -> clone or enter existing
-	tkPathInput                  // input the path / clone target dir
-	tkCommit                     // wait for commits (PR description)
-	tkReviewer                   // pick a reviewer (or skip)
-	tkPRCreating                 // creating PR + reviewer + Slack
-	tkPRDone                     // PR created, show url + Slack status
+	tkInput       taskStep = iota // enter work item id
+	tkShow                        // show work item + child tasks (multi-select)
+	tkNewTask                     // enter title(s) for new task(s) under the PBI
+	tkBindParent                  // 這張沒綁上層時，輸入要綁的上層 id
+	tkPickProject                 // 自動對應不到專案時，列出設定裡的專案讓使用者選
+	tkBranch                      // resolve project/repo + confirm branch
+	tkPath                        // no local path -> clone or enter existing
+	tkPathInput                   // input the path / clone target dir
+	tkCommit                      // wait for commits (PR description)
+	tkReviewer                    // pick a reviewer (or skip)
+	tkPRCreating                  // creating PR + reviewer + Slack
+	tkPRDone                      // PR created, show url + Slack status
 )
 
 type initStep int
@@ -142,6 +143,7 @@ type model struct {
 	pBindKind  string // "parent" (Feature) / "related" (Release)
 	pBindType  string
 	pBindTitle string
+	pBindOK    bool // 綁定實際成功（回導航器時才把父層記進新 PBI）
 
 	// home palette
 	cmdMatches []command
@@ -217,6 +219,10 @@ type model struct {
 	allTaskIDs []int        // finalized selected ids, carried for the PR to link all
 	navStack   []navFrame   // 導航器：祖先層（供返回上層還原）
 	navReturn  bool         // 從導航器進 pbi 建立流程；建完/取消回導航器而非 home
+
+	// 自動對應不到專案時的手選清單
+	pickKeys   []string
+	pickCursor int
 
 	// branch step
 	selTask      workItem
@@ -583,6 +589,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case bindDoneMsg:
 		m.loading = false
+		m.pBindOK = msg.err == nil
 		if msg.err != nil {
 			m.errMsg = "PBI 已建立，但綁定失敗:" + msg.err.Error()
 		}
@@ -624,6 +631,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.wi.parentID = msg.targetID // Feature 走 parent
 			}
 			m.wi.parentTyp = msg.targetTyp // 已綁，顯示在步驟一
+			// 麵包屑那份複本也要同步
+			for i := range m.taskRoute {
+				if m.taskRoute[i].id == m.wi.id {
+					m.taskRoute[i] = m.wi
+				}
+			}
 			m.errMsg = ""
 		}
 		m.tstep = tkShow
@@ -631,6 +644,12 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case parentInfoMsg:
 		if m.mode == modeTask && m.wi.id == msg.ownerID {
 			m.wi.parentTyp, m.wi.parentTitle = msg.typ, msg.title
+		}
+		// 麵包屑那份是複本，也要補上，步驟一才印得出最上層的父層 type
+		for i := range m.taskRoute {
+			if m.taskRoute[i].id == msg.ownerID {
+				m.taskRoute[i].parentTyp, m.taskRoute[i].parentTitle = msg.typ, msg.title
+			}
 		}
 		return m, nil
 	case taskCreatedMsg:
@@ -1771,7 +1790,7 @@ const (
 	rowCreateChild                     // 在這層建立下一層單
 	rowDone                            // 完成，繼續（建分支）
 	rowReleaseFlow                     // Release 發版
-	rowBindParent                      // PBI 沒綁父層 -> 綁到 Feature/Release
+	rowBindParent                      // 沒綁上層 -> 補綁（Release 用 related、其餘用 parent）
 )
 
 type levelRow struct {
@@ -1788,6 +1807,21 @@ func nextLevelType(typ string) string {
 		return "Task"
 	}
 	return ""
+}
+
+// bindTargetHint 提示這個 type 慣例上該綁到哪一層。Release 不在階層裡（用 related 綁），
+// 所以每一種都可以另外綁 Release。
+func bindTargetHint(typ string) string {
+	up := "上層單"
+	switch {
+	case strings.EqualFold(typ, "Feature"):
+		up = "Epic"
+	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"):
+		up = "Feature"
+	case strings.EqualFold(typ, "Task"):
+		up = "PBI"
+	}
+	return up + " / Release"
 }
 
 func shortType(t string) string {
@@ -1878,7 +1912,9 @@ func (m model) levelRows() []levelRow {
 	if nextLevelType(m.wi.typ) != "" {
 		rows = append(rows, levelRow{kind: rowCreateChild})
 	}
-	if strings.EqualFold(m.wi.typ, "Product Backlog Item") && m.wi.boundParentID() == 0 {
+	// Release 自己是被 related 綁的那一端，不需要上層；其餘 type 沒綁就給一列補綁。
+	// id==0 是「獨立 Task」流程（沒有工作項可綁），跳過。
+	if m.wi.id > 0 && !strings.EqualFold(m.wi.typ, "Release") && m.wi.boundParentID() == 0 {
 		rows = append(rows, levelRow{kind: rowBindParent})
 	}
 	if len(m.children) > 0 {
@@ -1911,7 +1947,7 @@ func (m model) levelRowLabel(r levelRow) string {
 	case rowReleaseFlow:
 		return "🚀 發版（跑 release 流程）"
 	case rowBindParent:
-		return "🔗 這張還沒綁父層，綁到 Feature / Release"
+		return "🔗 這張還沒綁上層，綁到 " + bindTargetHint(m.wi.typ)
 	}
 	return ""
 }
@@ -1929,31 +1965,73 @@ func (m model) levelRowLabels() []string {
 func (m model) toBranch(t workItem) (tea.Model, tea.Cmd) {
 	key, mp, ok := m.resolveMapping(t)
 	if !ok {
-		m.errMsg = "無法自動對應專案（Area / [Tag] / 關鍵字都沒中）；手動選之後補"
-		m.tstep = tkShow
+		// Area / [Tag] / 關鍵字都沒中 -> 列出設定裡的專案讓使用者自己選
+		m.selTask = t
+		m.pickKeys = sortedMappingKeys(m.cfg.Mappings)
+		if len(m.pickKeys) == 0 {
+			m.errMsg = "設定裡沒有任何專案對應，請先跑 /init"
+			m.tstep = tkShow
+			return m, nil
+		}
+		m.pickCursor = 0
+		m.tstep = tkPickProject
+		m.errMsg = ""
+		m.input.SetValue("")
+		m.input.Placeholder = "篩選專案…"
 		return m, nil
 	}
 	m.selTask = t
+	return m.withMapping(key, mp)
+}
+
+// withMapping 帶著決定好的專案對應（自動判出或使用者手選）進入建分支步驟。
+func (m model) withMapping(key string, mp mappingCfg) (tea.Model, tea.Cmd) {
 	m.mapKey = key
 	m.mapping = mp
 	m.baseBranch = mp.DefaultBranch
 	if m.baseBranch == "" {
 		m.baseBranch = "develop"
 	}
-	m.branchName = deriveBranchName(t.id, t.title)
+	m.branchName = deriveBranchName(m.selTask.id, m.selTask.title)
 	m.tstep = tkBranch
 	m.loading = true
 	m.errMsg = ""
+	m.input.SetValue("")
+	m.input.Placeholder = ""
 	return m, listRefsCmd(m.cfg.AzureOrg, mp.AzureProject, mp.AzureRepository)
+}
+
+// pickFilteredKeys 依輸入框關鍵字過濾手選清單（比對 key / 專案 / repo）。
+func (m model) pickFilteredKeys() []string {
+	q := strings.TrimSpace(m.input.Value())
+	var out []string
+	for _, k := range m.pickKeys {
+		mp := m.cfg.Mappings[k]
+		if q == "" || fuzzyMatch(q, k+" "+mp.AzureProject+" "+mp.AzureRepository) {
+			out = append(out, k)
+		}
+	}
+	return out
+}
+
+// pickProjectItems 是手選清單要顯示的項目字串。
+func (m model) pickProjectItems() []string {
+	var out []string
+	for _, k := range m.pickFilteredKeys() {
+		mp := m.cfg.Mappings[k]
+		out = append(out, k+"  ("+mp.AzureProject+" / "+mp.AzureRepository+")")
+	}
+	return out
 }
 
 func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if key.String() == "esc" {
-		if (m.tstep == tkNewTask || m.tstep == tkBindParent) && !m.loading {
-			// cancel new-task / bind entry -> back to the selection list
+		if (m.tstep == tkNewTask || m.tstep == tkBindParent || m.tstep == tkPickProject) && !m.loading {
+			// cancel new-task / bind / pick-project -> back to the selection list
 			m.tstep = tkShow
 			m.errMsg = ""
 			m.input.SetValue("")
+			m.input.Placeholder = ""
 			return m, nil
 		}
 		if m.tstep == tkShow && !m.loading && len(m.navStack) > 0 {
@@ -2035,7 +2113,7 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.tstep = tkBindParent
 				m.errMsg = ""
 				m.input.SetValue("")
-				m.input.Placeholder = "要綁的 Feature / Release ID"
+				m.input.Placeholder = "要綁的 " + bindTargetHint(m.wi.typ) + " ID"
 				return m, nil
 			case rowDone:
 				if len(m.selOrder) == 0 {
@@ -2093,6 +2171,32 @@ func (m model) updateTask(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
 		return m, cmd
+
+	case tkPickProject:
+		keys := m.pickFilteredKeys()
+		switch key.String() {
+		case "up":
+			if n := len(keys); n > 0 {
+				m.pickCursor = (m.pickCursor - 1 + n) % n
+			}
+			return m, nil
+		case "down":
+			if n := len(keys); n > 0 {
+				m.pickCursor = (m.pickCursor + 1) % n
+			}
+			return m, nil
+		case "enter":
+			if m.pickCursor >= len(keys) {
+				return m, nil
+			}
+			k := keys[m.pickCursor]
+			return m.withMapping(k, m.cfg.Mappings[k])
+		default:
+			var cmd tea.Cmd
+			m.input, cmd = m.input.Update(key)
+			m.pickCursor = 0
+			return m, cmd
+		}
 
 	case tkBranch:
 		if m.loading {
@@ -2915,7 +3019,7 @@ func (m model) taskPhase() int {
 		return 1
 	case tkShow, tkNewTask:
 		return 2
-	case tkBranch:
+	case tkPickProject, tkBranch:
 		return 3
 	case tkPath, tkPathInput:
 		return 4
@@ -2926,26 +3030,48 @@ func (m model) taskPhase() int {
 	}
 }
 
-// taskStepsView 列出 /task 的所有步驟。會實際寫入的步驟（建新 Task、建分支、建 PR）標 ⚠；
-// 純選現有 Task 或重用既有分支時，該步就不算寫入。
-func (m model) taskStepsView() string {
-	// 上層在前、自己在後，用 › 表示往下一層，讓階層一眼看得出來：
-	//   [Release] #35867 › [PBI] #36030
-	wiVal := ""
-	if m.wi.id > 0 {
-		if bid := m.wi.boundParentID(); bid > 0 {
-			pt := m.wi.parentTyp
+// hierarchyLabel 把整條階層串成一行：最上層那張的父層（若有）→ 一路鑽下來的每一層
+// → 最後選定的 Task，用 › 分隔，例如：
+//
+//	[Feature] #36205 › [PBI] #36206 › [Task] #36207
+func (m model) hierarchyLabel() string {
+	route := m.taskRoute
+	if len(route) == 0 && m.wi.id > 0 { // 還沒鑽層就先用當前這張；獨立 Task 則整條空著
+		route = []workItem{m.wi}
+	}
+	var parts []string
+	if len(route) > 0 {
+		if bid := route[0].boundParentID(); bid > 0 {
+			pt := route[0].parentTyp
 			if pt == "" {
-				pt = "上層"
+				pt = "上層" // parentInfoMsg 還沒回來
 			}
-			wiVal = "[" + shortType(pt) + "] #" + strconv.Itoa(bid) + " › "
+			parts = append(parts, "["+shortType(pt)+"] #"+strconv.Itoa(bid))
 		}
-		typ := m.wi.typ
+	}
+	deepest := 0
+	for _, r := range route {
+		typ := r.typ
 		if typ == "" {
 			typ = "?"
 		}
-		wiVal += "[" + shortType(typ) + "] #" + strconv.Itoa(m.wi.id)
+		parts = append(parts, "["+shortType(typ)+"] #"+strconv.Itoa(r.id))
+		deepest = r.id
 	}
+	// 用勾選挑 Task 不會進 taskRoute，這裡補上；多張只記張數，免得爆版
+	switch n := len(m.allTaskIDs); {
+	case n == 1 && m.allTaskIDs[0] != deepest:
+		parts = append(parts, "[Task] #"+strconv.Itoa(m.allTaskIDs[0]))
+	case n > 1:
+		parts = append(parts, fmt.Sprintf("[Task] ×%d", n))
+	}
+	return strings.Join(parts, " › ")
+}
+
+// taskStepsView 列出 /task 的所有步驟。會實際寫入的步驟（建新 Task、建分支、建 PR）標 ⚠；
+// 純選現有 Task 或重用既有分支時，該步就不算寫入。
+func (m model) taskStepsView() string {
+	wiVal := m.hierarchyLabel()
 	taskVal := ""
 	if n := len(m.allTaskIDs); n > 0 {
 		taskVal = fmt.Sprintf("%d 張", n)
@@ -3041,14 +3167,23 @@ func (m model) viewTask() string {
 		}
 
 	case tkBindParent:
-		body.WriteString(styleBold(accent, "綁定父層") + "\n\n")
-		body.WriteString(styleFg(muted, "PBI ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n\n")
+		body.WriteString(styleBold(accent, "綁定上層") + "\n\n")
+		body.WriteString(styleFg(muted, shortType(m.wi.typ)+" ") + "#" + strconv.Itoa(m.wi.id) + " " + m.wi.title + "\n\n")
 		if m.loading {
 			body.WriteString(m.spin.View() + " " + styleFg(muted, "綁定中…"))
 		} else {
-			body.WriteString(styleFg(muted, "輸入要綁的單 ID：Feature 用 parent、Release 用 related 綁。") + "\n\n")
+			body.WriteString(styleFg(muted, "輸入要綁的單 ID（一般是 "+bindTargetHint(m.wi.typ)+"）：Release 用 related 綁，其餘用 parent。") + "\n\n")
 			body.WriteString(styleFg(errCol, "⚠ 按 Enter 會實際綁定（寫入 Azure）"))
 		}
+
+	case tkPickProject:
+		body.WriteString(styleBold(accent, "選擇專案") + "\n\n")
+		body.WriteString(styleFg(muted, "Task ") + "#" + strconv.Itoa(m.selTask.id) + " " + m.selTask.title + "\n")
+		if m.selTask.area != "" {
+			body.WriteString(styleFg(muted, "Area ") + m.selTask.area + "\n")
+		}
+		body.WriteString("\n" + styleFg(muted, "無法從 Area、標題 [Tag] 或關鍵字自動判斷專案，請自己選一個。") + "\n\n")
+		body.WriteString(renderList(m.pickProjectItems(), m.pickCursor))
 
 	case tkBranch:
 		body.WriteString(styleBold(accent, "建立分支") + "\n\n")
@@ -3158,7 +3293,8 @@ func (m model) viewTask() string {
 
 	content := strings.TrimRight(body.String(), "\n")
 	// 輸入框放在說明之後：先讀「這步在做什麼」，再動手打字
-	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask || m.tstep == tkBindParent {
+	if m.tstep == tkInput || m.tstep == tkPathInput || m.tstep == tkNewTask || m.tstep == tkBindParent ||
+		m.tstep == tkPickProject {
 		content += "\n\n" + m.input.View()
 	}
 	box := lipgloss.NewStyle().
@@ -3185,6 +3321,8 @@ func (m model) taskHint() string {
 		return "⏎ 建立   esc 返回"
 	case tkBindParent:
 		return "⏎ 綁定   esc 返回"
+	case tkPickProject:
+		return "↑↓ 選擇   ⏎ 確認   esc 返回"
 	case tkBranch:
 		return "⏎ 建立分支   esc 取消"
 	case tkPath:
