@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -10,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -140,19 +142,42 @@ func azCommand(args []string) (string, []string) {
 	return "az", args
 }
 
+// cmdTimeout bounds every az/git call so a hung process can't wedge the run
+// forever (headless has no human to notice a spinner that never stops). It is
+// deliberately generous — normal calls take seconds, the slowest observed are
+// `az devops team list-member` over many teams and `git fetch` on a big repo —
+// so hitting it means something is genuinely wrong, not merely slow.
+// Override with VLUI_TIMEOUT_SEC if some environment really is slower.
+func cmdTimeout() time.Duration {
+	if s := os.Getenv("VLUI_TIMEOUT_SEC"); s != "" {
+		if n, err := strconv.Atoi(s); err == nil && n > 0 {
+			return time.Duration(n) * time.Second
+		}
+	}
+	return 120 * time.Second
+}
+
 // run executes a command and returns trimmed stdout. On failure it surfaces the
 // first line of stderr (az errors are multi-line) so the UI can show something useful.
 func run(name string, args ...string) (string, error) {
+	label := name // azCommand 會把 "az" 換成 python.exe 的完整路徑，訊息要用原本的名字
 	if name == "az" {
 		name, args = azCommand(args)
 	}
-	cmd := exec.Command(name, args...)
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout())
+	defer cancel()
+	cmd := exec.CommandContext(ctx, name, args...)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr
 	out, err := cmd.Output()
 	if err != nil {
 		e := strings.TrimSpace(stderr.String())
 		dbg("RUN FAIL: %s %s\n  err=%v\n  stderr=%s", name, strings.Join(args, " "), err, e)
+		// 逾時要跟一般失敗分開講：指令可能其實已經在伺服器端生效了（例如 PR 建到
+		// 一半），直接重跑有可能建出第二份，所以提示先去確認再重試。
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("%s 執行逾時（超過 %s）；重跑前請先確認這個動作是不是其實已經生效", label, cmdTimeout())
+		}
 		if e != "" {
 			return "", fmt.Errorf("%s", firstLine(e))
 		}
@@ -604,7 +629,12 @@ type cloneMsg struct {
 }
 
 func gitIn(path string, args ...string) (string, error) {
-	out, err := exec.Command("git", append([]string{"-C", path}, args...)...).Output()
+	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout())
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", path}, args...)...).Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return "", fmt.Errorf("git %s 執行逾時（超過 %s）", firstLine(strings.Join(args, " ")), cmdTimeout())
+	}
 	return strings.TrimSpace(string(out)), err
 }
 

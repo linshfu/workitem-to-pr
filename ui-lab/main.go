@@ -750,18 +750,7 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.errMsg = ""
-		m.branchReuse = ""
-		m.baseObjectID = ""
-		tag := strconv.Itoa(m.selTask.id)
-		for _, r := range msg.refs {
-			name := strings.TrimPrefix(r.name, "refs/heads/")
-			if m.branchReuse == "" && strings.Contains(name, tag) && !strings.HasPrefix(name, "release/") {
-				m.branchReuse = name
-			}
-			if strings.EqualFold(r.name, "refs/heads/"+m.baseBranch) {
-				m.baseObjectID = r.objectID
-			}
-		}
+		m.branchReuse, m.baseObjectID = pickBranchReuseAndBase(msg.refs, m.selTask.id, m.baseBranch)
 		return m, nil
 	case branchMsg:
 		m.loading = false
@@ -1706,6 +1695,24 @@ func deriveBranchName(taskID int, title string) string {
 		c = string(r[:50])
 	}
 	return fmt.Sprintf("task/%d-%s", taskID, c)
+}
+
+// pickBranchReuseAndBase scans refs for a branch already tagged with taskID
+// (reuse candidate) and the objectID of baseBranch, mirroring the case
+// refsMsg handling below. Shared with headless mode so both paths pick the
+// same branch the same way.
+func pickBranchReuseAndBase(refs []refInfo, taskID int, baseBranch string) (reuse, baseObjectID string) {
+	tag := strconv.Itoa(taskID)
+	for _, r := range refs {
+		name := strings.TrimPrefix(r.name, "refs/heads/")
+		if reuse == "" && strings.Contains(name, tag) && !strings.HasPrefix(name, "release/") {
+			reuse = name
+		}
+		if strings.EqualFold(r.name, "refs/heads/"+baseBranch) {
+			baseObjectID = r.objectID
+		}
+	}
+	return
 }
 
 // cleanPath 去掉使用者貼路徑時常帶的前後引號與空白（檔案總管「複製路徑」會加雙引號）。
@@ -3345,6 +3352,9 @@ func (m model) taskHint() string {
 }
 
 func main() {
+	if isHeadless(os.Args[1:]) {
+		os.Exit(runHeadless(os.Args[1:]))
+	}
 	fm, err := tea.NewProgram(initialModel()).Run()
 	if err != nil {
 		fmt.Println("error:", err)

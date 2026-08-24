@@ -335,13 +335,13 @@ type dupPbiMsg struct {
 	err   error
 }
 
-// searchPbiByTitleCmd 查同專案是否已有同名的 PBI（標題完全相同），用來在建立前提醒重複。
-func searchPbiByTitleCmd(org, project, title string) tea.Cmd {
+// searchByTitleCmd 查同專案是否已有同型別、同標題（完全相同）的單，用來在建立前提醒重複。
+func searchByTitleCmd(org, project, typ, title string) tea.Cmd {
 	return func() tea.Msg {
 		esc := strings.ReplaceAll(title, "'", "''") // WIQL 字串用兩個單引號跳脫
 		wiql := "SELECT [System.Id],[System.Title],[System.State],[System.AssignedTo] FROM WorkItems" +
 			" WHERE [System.TeamProject]='" + project + "'" +
-			" AND [System.WorkItemType]='Product Backlog Item'" +
+			" AND [System.WorkItemType]='" + strings.ReplaceAll(typ, "'", "''") + "'" +
 			" AND [System.Title]='" + esc + "'"
 		out, err := run("az", "boards", "query", "--organization", org, "--project", project, "--wiql", wiql, "-o", "json")
 		if err != nil {
@@ -521,7 +521,7 @@ func (m model) updatePbi(key tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.input.SetValue("")
 			m.pstep = pbDupCheck
 			m.loading = true
-			return m, searchPbiByTitleCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject, t)
+			return m, searchByTitleCmd(m.cfg.AzureOrg, m.cfg.WorkItemProject, "Product Backlog Item", t)
 		}
 		var cmd tea.Cmd
 		m.input, cmd = m.input.Update(key)
