@@ -15,3 +15,6 @@ dist/
 
 # debug logs
 *.log
+
+# 稽核／盤點報告（本機參考用，不進版控）
+.reports/

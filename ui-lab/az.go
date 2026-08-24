@@ -628,14 +628,27 @@ type cloneMsg struct {
 	err  error
 }
 
+// gitIn runs git in a repo. Like run() it surfaces the first line of stderr on
+// failure — without that, callers only get "exit status 128", which tells nobody
+// (least of all a headless run with no human to guess) what actually went wrong.
 func gitIn(path string, args ...string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), cmdTimeout())
 	defer cancel()
-	out, err := exec.CommandContext(ctx, "git", append([]string{"-C", path}, args...)...).Output()
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", path}, args...)...)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	out, err := cmd.Output()
 	if ctx.Err() == context.DeadlineExceeded {
-		return "", fmt.Errorf("git %s 執行逾時（超過 %s）", firstLine(strings.Join(args, " ")), cmdTimeout())
+		return "", fmt.Errorf("git %s 執行逾時（超過 %s）", strings.Join(args, " "), cmdTimeout())
 	}
-	return strings.TrimSpace(string(out)), err
+	if err != nil {
+		if e := strings.TrimSpace(stderr.String()); e != "" {
+			dbg("GIT FAIL: git -C %s %s\n  err=%v\n  stderr=%s", path, strings.Join(args, " "), err, e)
+			return "", fmt.Errorf("%s", firstLine(e))
+		}
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 // commitCheckCmd reads git log origin/<base>..origin/<branch> for the PR description.

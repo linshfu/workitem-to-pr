@@ -288,6 +288,104 @@ func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 	})
 }
 
+func TestParseHeadlessArgsHotfixMode(t *testing.T) {
+	base := []string{"--headless", "--hotfix", "--project", "legal", "--version", "7.14.4"}
+
+	t.Run("three steps parse distinctly", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			extra      []string
+			branchOnly bool
+			bump       bool
+		}{
+			{"branch step", []string{"--branch"}, true, false},
+			{"bump step", []string{"--bump"}, false, true},
+			{"pr step", nil, false, false},
+		}
+		for _, c := range cases {
+			o, err := parseHeadlessArgs(append(append([]string{}, base...), c.extra...))
+			if err != nil {
+				t.Fatalf("%s: unexpected error: %v", c.name, err)
+			}
+			if !o.hotfixMode || o.projectKey != "legal" || o.version != "7.14.4" {
+				t.Errorf("%s: got %+v", c.name, o)
+			}
+			if o.branchOnly != c.branchOnly || o.bump != c.bump {
+				t.Errorf("%s: branchOnly=%v bump=%v, want %v/%v", c.name, o.branchOnly, o.bump, c.branchOnly, c.bump)
+			}
+			if got := o.hotfixBranch(); got != "hotfix/v7.14.4" {
+				t.Errorf("%s: hotfixBranch() = %q", c.name, got)
+			}
+		}
+	})
+
+	t.Run("branch and bump are mutually exclusive", func(t *testing.T) {
+		_, err := parseHeadlessArgs(append(append([]string{}, base...), "--branch", "--bump"))
+		if err == nil {
+			t.Fatal("expected error for --branch with --bump")
+		}
+	})
+
+	t.Run("bump requires hotfix mode", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--headless", "36346", "--bump"},
+			{"--headless", "--release", "--project", "legal", "--version", "1.2.3", "--bump"},
+		} {
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+
+	t.Run("release and hotfix cannot combine", func(t *testing.T) {
+		_, err := parseHeadlessArgs([]string{"--headless", "--release", "--hotfix",
+			"--project", "legal", "--version", "1.2.3"})
+		if err == nil {
+			t.Fatal("expected error for --release with --hotfix")
+		}
+	})
+
+	t.Run("branch/bump steps reject PR flags", func(t *testing.T) {
+		for _, step := range []string{"--branch", "--bump"} {
+			args := append(append([]string{}, base...), step, "--reviewer", "a@b.com")
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %s with --reviewer", step)
+			}
+		}
+	})
+
+	t.Run("pr step accepts reviewer", func(t *testing.T) {
+		o, err := parseHeadlessArgs(append(append([]string{}, base...), "--reviewer", "a@b.com"))
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.reviewerEmail != "a@b.com" || o.branchOnly || o.bump {
+			t.Errorf("got %+v", o)
+		}
+	})
+
+	t.Run("requires project and version", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--headless", "--hotfix"},
+			{"--headless", "--hotfix", "--project", "legal"},
+			{"--headless", "--hotfix", "--version", "1.2.3"},
+		} {
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+
+	t.Run("rejects work item ids and --new", func(t *testing.T) {
+		for _, extra := range [][]string{{"36346"}, {"--new", "A"}} {
+			args := append(append([]string{}, base...), extra...)
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+}
+
 func TestParseHeadlessArgsCreateMode(t *testing.T) {
 	t.Run("single new title", func(t *testing.T) {
 		o, err := parseHeadlessArgs([]string{"--headless", "36261", "--new", "[Legal][前端] 標籤側欄"})

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"strconv"
 	"strings"
 )
@@ -26,13 +27,21 @@ type headlessOpts struct {
 	newTitles     []string // 非空＝建單模式（在 workItemID 底下建下一層單）
 
 	releaseMode bool   // --release：對既有的 release/vX.Y.Z 分支開 master + develop 兩張 PR
-	projectKey  string // --project：release 模式用哪個 mapping（沒有工作項可以推）
+	hotfixMode  bool   // --hotfix：從 master 開 hotfix 分支 / 改版號 / 開雙 PR（分三次呼叫）
+	bump        bool   // --bump：只跑改版號那段（npm run release + build:prod + commit + push）
+	projectKey  string // --project：release/hotfix 模式用哪個 mapping（沒有工作項可以推）
 	version     string // --version：x.y.z
 }
+
+// projectMode 是靠 --project/--version 定位、不吃工作項 ID 的模式。
+func (o headlessOpts) projectMode() bool { return o.releaseMode || o.hotfixMode }
+
+// releaseBranch/hotfixBranch 是各自流程用的分支名。
 
 // releaseBranch 是 release.sh 產生的分支名（`release/v` + 版號），headless 只
 // 驗證它存在、不自己建——建分支跟 prod build 都是 release.sh 的事。
 func (o headlessOpts) releaseBranch() string { return "release/v" + o.version }
+func (o headlessOpts) hotfixBranch() string  { return "hotfix/v" + o.version }
 
 // linkedIDs is every work item the PR should link: the primary first (it named
 // the branch), then the extras — mirrors the interactive flow's allTaskIDs.
@@ -117,6 +126,10 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 			o.branchOnly = true
 		case a == "--release":
 			o.releaseMode = true
+		case a == "--hotfix":
+			o.hotfixMode = true
+		case a == "--bump":
+			o.bump = true
 		case a == "--project", strings.HasPrefix(a, "--project="):
 			v, err := flagValue(a, "--project", args, &i)
 			if err != nil {
@@ -178,27 +191,47 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 			}
 		}
 	}
-	// release 模式沒有工作項可以推，靠 --project / --version 定位，所以它的必填
-	// 條件跟另外兩種模式完全不同，先擋掉組合錯誤再檢查 ID。
-	if o.releaseMode {
-		if o.createMode() || o.branchOnly {
-			return headlessOpts{}, fmt.Errorf("--release 不能跟 --new/--branch 一起用")
+	// release / hotfix 沒有工作項可以推，靠 --project / --version 定位，所以必填條件
+	// 跟另外兩種模式完全不同，先擋掉組合錯誤再檢查 ID。
+	if o.releaseMode && o.hotfixMode {
+		return headlessOpts{}, fmt.Errorf("--release 跟 --hotfix 不能同時給")
+	}
+	if o.bump && !o.hotfixMode {
+		return headlessOpts{}, fmt.Errorf("--bump 只有 --hotfix 模式會用到")
+	}
+	if o.projectMode() {
+		label := "--release"
+		if o.hotfixMode {
+			label = "--hotfix"
+		}
+		if o.createMode() {
+			return headlessOpts{}, fmt.Errorf("%s 不能跟 --new 一起用", label)
+		}
+		if o.releaseMode && o.branchOnly {
+			return headlessOpts{}, fmt.Errorf("--release 不能跟 --branch 一起用（發版分支是 release.sh 建的）")
+		}
+		if o.branchOnly && o.bump {
+			return headlessOpts{}, fmt.Errorf("--branch 跟 --bump 是不同的步驟，不能同時給")
 		}
 		if haveID || len(o.extraIDs) > 0 {
-			return headlessOpts{}, fmt.Errorf("--release 不吃工作項 ID（發版 PR 不掛工作項，與互動版一致）")
+			return headlessOpts{}, fmt.Errorf("%s 不吃工作項 ID（發版/修補的 PR 不掛工作項，與互動版一致）", label)
 		}
 		if o.projectKey == "" || o.version == "" {
-			return headlessOpts{}, fmt.Errorf("--release 需要 --project <對應名> 跟 --version <x.y.z>")
+			return headlessOpts{}, fmt.Errorf("%s 需要 --project <對應名> 跟 --version <x.y.z>", label)
 		}
 		if !releaseVersionRe.MatchString(o.version) {
 			return headlessOpts{}, fmt.Errorf("版號格式要是 x.y.z（收到 %q）", o.version)
 		}
+		// --branch / --bump 都不會建 PR，reviewer/Slack 旗標在那兩步沒有意義。
+		if (o.branchOnly || o.bump) && (o.reviewerEmail != "" || o.skipSlack || sawSkipReviewer) {
+			return headlessOpts{}, fmt.Errorf("這一步不建 PR，不能跟 --reviewer/--skip-slack/--skip-reviewer 一起用")
+		}
 	} else {
 		if o.projectKey != "" || o.version != "" {
-			return headlessOpts{}, fmt.Errorf("--project/--version 只有 --release 模式會用到")
+			return headlessOpts{}, fmt.Errorf("--project/--version 只有 --release/--hotfix 模式會用到")
 		}
 		if !haveID {
-			return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]  或  vlui --headless --release --project <對應名> --version <x.y.z>")
+			return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]  或  vlui --headless --release|--hotfix --project <對應名> --version <x.y.z>")
 		}
 	}
 	if o.reviewerEmail != "" && sawSkipReviewer {
@@ -256,6 +289,9 @@ type headlessRun struct {
 	// 建單模式用
 	childType string
 	outcomes  []createOutcome
+
+	// hotfix 用
+	bumped bool // 版號那筆 commit 已經在（剛跑完 --bump，或在 commit 清單裡看到）
 }
 
 // runHeadless is the process-level entry point: parse args, load config, run
@@ -275,10 +311,258 @@ func runHeadless(args []string) int {
 	switch {
 	case opts.releaseMode:
 		return r.executeRelease()
+	case opts.hotfixMode:
+		return r.executeHotfix()
 	case opts.createMode():
 		return r.executeCreate()
 	}
 	return r.execute()
+}
+
+// executeHotfix runs one of the three hotfix steps, split where the flow needs a
+// human: --branch opens hotfix/vX.Y.Z off master, then someone writes and pushes
+// the fix; --bump runs the version-bump chain (npm ci + release + prod build +
+// commit + push, minutes long); with neither it verifies the commits and opens
+// the master + develop PR pair. Mirrors the interactive /hotfix order.
+func (r *headlessRun) executeHotfix() int {
+	mapping, ok := r.cfg.Mappings[r.opts.projectKey]
+	if !ok {
+		return r.fail(exitHeadlessFail, "專案對應",
+			fmt.Errorf("設定裡沒有 %q 這個對應（目前有: %s）；要新增請跑互動模式的 /init",
+				r.opts.projectKey, strings.Join(sortedMappingKeys(r.cfg.Mappings), ", ")))
+	}
+	r.mapKey, r.mapping = r.opts.projectKey, mapping
+	r.branchName = r.opts.hotfixBranch()
+	r.baseBranch = "master" // hotfix 一律從 master 出來，與互動版／PS 版一致
+
+	r.localPath = mappingLocalPathOf(r.cfg, r.opts.projectKey)
+	if !isGitRepo(r.localPath) {
+		where := "設定裡沒有填路徑"
+		if r.localPath != "" {
+			where = fmt.Sprintf("設定指到 %q，但那裡不是 git repo", r.localPath)
+		}
+		return r.fail(exitHeadlessFail, "本機路徑",
+			fmt.Errorf("專案 %q 沒有可用的本機 git repo（%s）；hotfix 全程都靠本機 git，請先 clone 或跑 /init 設定路徑",
+				r.opts.projectKey, where))
+	}
+
+	switch {
+	case r.opts.branchOnly:
+		return r.hotfixStepBranch()
+	case r.opts.bump:
+		return r.hotfixStepBump()
+	}
+	return r.hotfixStepPRs()
+}
+
+// hotfixStepBranch updates master and opens (or reuses) the hotfix branch.
+func (r *headlessRun) hotfixStepBranch() int {
+	if r.opts.dryRun {
+		r.slackState = ""
+		fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
+		return exitHeadlessOK
+	}
+	msg := hotfixBranchCmd(r.localPath, r.branchName)().(hotfixBranchMsg)
+	if msg.err != nil {
+		return r.fail(exitHeadlessFail, "開 hotfix 分支", msg.err)
+	}
+	r.branchName, r.reused, r.branchReal = msg.branch, msg.reused, true
+	fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
+	return exitHeadlessOK
+}
+
+// hotfixStepBump runs the version-bump chain in Git Bash. It streams straight to
+// this process's stdout/stderr (no Bubble Tea to hand the terminal to) and gets
+// no timeout, because `npm ci` plus a prod build legitimately takes minutes.
+// Stdin is left nil so anything that tries to prompt hits EOF instead of hanging.
+func (r *headlessRun) hotfixStepBump() int {
+	gitBash := releaseGitBashPath()
+	if !fileExists(gitBash) {
+		return r.fail(exitHeadlessFail, "改版號", fmt.Errorf("找不到 Git Bash（%s）", gitBash))
+	}
+	script, err := buildHotfixBumpCommand(r.localPath, r.branchName, r.opts.version)
+	if err != nil {
+		return r.fail(exitHeadlessFail, "改版號", err)
+	}
+	if r.opts.dryRun {
+		fmt.Println("[DRY RUN] 會在 Git Bash 執行：")
+		fmt.Println("  " + script)
+		fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
+		return exitHeadlessOK
+	}
+	fmt.Println("執行改版號（npm ci + npm run release + build:prod + commit + push，需要幾分鐘）…")
+	cmd := exec.Command(gitBash, "-c", script)
+	cmd.Stdout, cmd.Stderr, cmd.Stdin = os.Stdout, os.Stderr, nil
+	if err := cmd.Run(); err != nil {
+		return r.fail(exitHeadlessFail, "改版號",
+			fmt.Errorf("%v；上面的輸出有實際原因。注意這條指令是一連串動作，可能已經改了版號或 commit，"+
+				"重跑前先看 git status / git log", err))
+	}
+	r.branchReal = true
+	r.bumped = true
+	fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
+	return exitHeadlessOK
+}
+
+// hotfixStepPRs verifies the fix is on origin, then opens the master + develop PRs.
+func (r *headlessRun) hotfixStepPRs() int {
+	// 先確認分支在 origin 上。少了這一步，下面的 git log origin/master..origin/<分支>
+	// 只會回一個看不懂的 exit 128，而真正的原因是「還沒跑 --branch」。
+	if _, err := gitIn(r.localPath, "fetch", "origin"); err != nil {
+		return r.fail(exitHeadlessFail, "git fetch", err)
+	}
+	rb, _ := gitIn(r.localPath, "branch", "-r", "--list", "origin/"+r.branchName)
+	if strings.TrimSpace(rb) == "" {
+		return r.fail(exitHeadlessNeedsCommits, "檢查 hotfix 分支",
+			fmt.Errorf("origin 上找不到 %s；請先跑 --branch 開分支，把修正 commit + push 之後再回來開 PR", r.branchName))
+	}
+
+	cm := hotfixCommitCmd(r.localPath, r.branchName)().(hotfixCommitMsg)
+	if cm.err != nil {
+		return r.fail(exitHeadlessFail, "commit 檢查", cm.err)
+	}
+	r.commits, r.commitCount = cm.commits, cm.count
+	r.branchReal = true
+	if r.commitCount == 0 {
+		return r.fail(exitHeadlessNeedsCommits, "commit 檢查",
+			fmt.Errorf("%s 相對 master 沒有新 commit；請先把修正 commit 並 push（還沒開分支的話先跑 --branch）", r.branchName))
+	}
+	// 改版號那筆 commit 訊息固定是 "release: v<版號>"（buildHotfixBumpCommand 定的），
+	// 沒看到就提醒——漏改版號是這條流程最常見的失誤，但不擋，使用者可能另有做法。
+	r.bumped = strings.Contains(r.commits, "release: v"+r.opts.version)
+
+	if r.opts.reviewerEmail != "" {
+		r.chosenRev = reviewer{
+			email:   r.opts.reviewerEmail,
+			slackID: slackIDFor(r.opts.reviewerEmail, r.cfg.Slack.Members),
+		}
+	}
+
+	desc := r.commits
+	if strings.TrimSpace(desc) == "" {
+		desc = "Hotfix v" + r.opts.version
+	}
+	var prResult string
+	if r.opts.dryRun {
+		r.prURL = "DRY-RUN"
+	} else {
+		msg := createReleasePRsCmd(r.cfg.AzureOrg, r.mapping.AzureProject, r.mapping.AzureRepository,
+			r.branchName, desc, nil, r.chosenRev)().(releasePRsMsg)
+		if msg.err != nil {
+			r.prURL = msg.masterURL // master 成功、develop 失敗時要讓人看到已存在的那張
+			return r.fail(exitHeadlessFail, "建立 hotfix PR", msg.err)
+		}
+		r.prURL = msg.masterURL + "\n     develop: " + msg.developURL
+		r.reviewerErr = msg.reviewerErr
+		prResult = msg.prResult
+	}
+
+	slackFailed := false
+	switch {
+	case r.opts.skipSlack:
+		r.slackState = "略過 (--skip-slack)"
+	case r.chosenRev.slackID == "":
+		r.slackState = "略過 (沒有指定 reviewer，或 reviewer 沒有對應 Slack 帳號)"
+	case !(model{cfg: r.cfg}).slackConfigured():
+		r.slackState = "略過 (config 沒有設定 Slack token/channel)"
+	case r.opts.dryRun:
+		r.slackState = "[DRY RUN] 會通知 " + r.chosenRev.email
+	default:
+		sd := slackNotifyCmd(r.cfg.SlackToken, r.cfg.Slack.Channel, r.chosenRev.slackID, prResult)().(slackDoneMsg)
+		if sd.err != nil {
+			r.slackState = "失敗: " + sd.err.Error()
+			slackFailed = true
+		} else {
+			r.slackState = "已通知 #" + r.cfg.Slack.Channel
+		}
+	}
+
+	fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
+	if slackFailed {
+		return exitHeadlessSlackFailed
+	}
+	return exitHeadlessOK
+}
+
+// formatHeadlessHotfixSummary reports whichever hotfix step just ran.
+func formatHeadlessHotfixSummary(r *headlessRun, ok bool, failPhase string, failErr error) string {
+	var b strings.Builder
+	step := "開 PR"
+	switch {
+	case r.opts.branchOnly:
+		step = "開分支"
+	case r.opts.bump:
+		step = "改版號"
+	}
+	fmt.Fprintf(&b, "Hotfix v%s（步驟：%s）\n", r.opts.version, step)
+	if r.mapKey != "" {
+		fmt.Fprintf(&b, "專案對應: %s -> %s/%s\n", r.mapKey, r.mapping.AzureProject, r.mapping.AzureRepository)
+	}
+	if r.localPath != "" {
+		fmt.Fprintf(&b, "本機路徑: %s\n", r.localPath)
+	}
+	if r.branchName != "" {
+		// 狀態要按步驟講：只有「開分支」那步會建立它，其他兩步是假設它已經在了。
+		var state string
+		switch {
+		case r.reused:
+			state = "沿用既有"
+		case r.branchReal:
+			state = "已建立並 push"
+		case r.opts.branchOnly && r.opts.dryRun:
+			state = "[DRY RUN] 不會真的建立"
+		case r.opts.branchOnly:
+			state = "尚未建立"
+		default:
+			state = "假設已存在（由 --branch 那步建立）"
+		}
+		fmt.Fprintf(&b, "分支: %s (%s, 從 master)\n", r.branchName, state)
+	}
+
+	if r.opts.branchOnly && ok && !r.opts.dryRun {
+		b.WriteString("下一步: 在這個分支上完成修正、commit、push，接著跑 --bump 改版號\n")
+	}
+	if r.opts.bump {
+		if ok && !r.opts.dryRun {
+			b.WriteString("版號已改並 push；下一步: 不帶 --branch/--bump 再跑一次開雙 PR\n")
+		}
+	}
+	if !r.opts.branchOnly && !r.opts.bump {
+		if r.commitCount > 0 {
+			fmt.Fprintf(&b, "commit: %d 筆（相對 master）\n", r.commitCount)
+		}
+		if r.commitCount > 0 && !r.bumped {
+			fmt.Fprintf(&b, "⚠ 沒看到 \"release: v%s\" 這筆 commit，版號可能還沒改（要改的話先跑 --bump）\n", r.opts.version)
+		}
+		if r.opts.reviewerEmail != "" {
+			fmt.Fprintf(&b, "reviewer: %s\n", r.opts.reviewerEmail)
+		} else {
+			b.WriteString("reviewer: 略過 (未指定 --reviewer)\n")
+		}
+		if r.reviewerErr != "" {
+			fmt.Fprintf(&b, "reviewer 警告: %s\n", r.reviewerErr)
+		}
+		if r.prURL != "" {
+			fmt.Fprintf(&b, "PR: master: %s\n", r.prURL)
+		}
+		if r.slackState != "" {
+			fmt.Fprintf(&b, "Slack: %s\n", r.slackState)
+		}
+	}
+
+	switch {
+	case !ok:
+		fmt.Fprintf(&b, "結果: 失敗 (%s): %v\n", failPhase, failErr)
+	case r.opts.dryRun:
+		b.WriteString("結果: 模擬完成 (沒有任何寫入)\n")
+	case r.opts.branchOnly:
+		b.WriteString("結果: 成功 (分支就緒，未建 PR)\n")
+	case r.opts.bump:
+		b.WriteString("結果: 成功 (版號已改，未建 PR)\n")
+	default:
+		b.WriteString("結果: 成功 (master 與 develop 兩張 PR 都建好)\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // executeRelease opens the master + develop PRs for an existing release/vX.Y.Z
@@ -715,6 +999,8 @@ func (r *headlessRun) fail(code int, phase string, err error) int {
 	switch {
 	case r.opts.releaseMode:
 		fmt.Println(formatHeadlessReleaseSummary(r, false, phase, err))
+	case r.opts.hotfixMode:
+		fmt.Println(formatHeadlessHotfixSummary(r, false, phase, err))
 	case r.opts.createMode():
 		fmt.Println(formatHeadlessCreateSummary(r, false, phase, err))
 	default:
