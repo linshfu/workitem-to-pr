@@ -204,6 +204,90 @@ func TestParseHeadlessArgsBranchOnly(t *testing.T) {
 	})
 }
 
+func TestParseHeadlessArgsReleaseMode(t *testing.T) {
+	t.Run("project and version, separate values", func(t *testing.T) {
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal", "--version", "7.14.4"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if !o.releaseMode || o.projectKey != "legal" || o.version != "7.14.4" {
+			t.Errorf("got %+v", o)
+		}
+		if got := o.releaseBranch(); got != "release/v7.14.4" {
+			t.Errorf("releaseBranch() = %q, want release/v7.14.4", got)
+		}
+	})
+
+	t.Run("equals form", func(t *testing.T) {
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project=legal", "--version=1.2.3"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.projectKey != "legal" || o.version != "1.2.3" {
+			t.Errorf("got %+v", o)
+		}
+	})
+
+	t.Run("rejects bad version format", func(t *testing.T) {
+		for _, v := range []string{"7.14", "v7.14.4", "7.14.4-beta", "abc"} {
+			_, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal", "--version", v})
+			if err == nil {
+				t.Errorf("expected error for version %q", v)
+			}
+		}
+	})
+
+	t.Run("requires project and version", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--headless", "--release"},
+			{"--headless", "--release", "--project", "legal"},
+			{"--headless", "--release", "--version", "1.2.3"},
+		} {
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+
+	t.Run("rejects work item ids", func(t *testing.T) {
+		_, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal", "--version", "1.2.3", "36346"})
+		if err == nil {
+			t.Fatal("expected error: --release takes no work item id")
+		}
+	})
+
+	t.Run("rejects combining with new or branch", func(t *testing.T) {
+		for _, extra := range [][]string{{"--new", "A"}, {"--branch"}} {
+			args := append([]string{"--headless", "--release", "--project", "legal", "--version", "1.2.3"}, extra...)
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+
+	t.Run("project/version rejected outside release mode", func(t *testing.T) {
+		for _, args := range [][]string{
+			{"--headless", "36346", "--project", "legal"},
+			{"--headless", "36346", "--version", "1.2.3"},
+		} {
+			if _, err := parseHeadlessArgs(args); err == nil {
+				t.Errorf("expected error for %v", args)
+			}
+		}
+	})
+
+	t.Run("reviewer and dry-run allowed", func(t *testing.T) {
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
+			"--version", "1.2.3", "--reviewer", "a@b.com", "--dry-run"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if o.reviewerEmail != "a@b.com" || !o.dryRun {
+			t.Errorf("got %+v", o)
+		}
+	})
+}
+
 func TestParseHeadlessArgsCreateMode(t *testing.T) {
 	t.Run("single new title", func(t *testing.T) {
 		o, err := parseHeadlessArgs([]string{"--headless", "36261", "--new", "[Legal][前端] 標籤側欄"})

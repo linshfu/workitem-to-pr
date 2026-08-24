@@ -24,7 +24,15 @@ type headlessOpts struct {
 	branchOnly    bool // 只把分支準備好就停，不檢查 commit、不建 PR
 	reviewerEmail string
 	newTitles     []string // 非空＝建單模式（在 workItemID 底下建下一層單）
+
+	releaseMode bool   // --release：對既有的 release/vX.Y.Z 分支開 master + develop 兩張 PR
+	projectKey  string // --project：release 模式用哪個 mapping（沒有工作項可以推）
+	version     string // --version：x.y.z
 }
+
+// releaseBranch 是 release.sh 產生的分支名（`release/v` + 版號），headless 只
+// 驗證它存在、不自己建——建分支跟 prod build 都是 release.sh 的事。
+func (o headlessOpts) releaseBranch() string { return "release/v" + o.version }
 
 // linkedIDs is every work item the PR should link: the primary first (it named
 // the branch), then the extras — mirrors the interactive flow's allTaskIDs.
@@ -63,6 +71,27 @@ func isHeadless(args []string) bool {
 	return false
 }
 
+// flagValue reads a flag's value, accepting both `--flag value` and `--flag=value`.
+// i is advanced past a consumed separate value.
+func flagValue(arg, name string, args []string, i *int) (string, error) {
+	if strings.HasPrefix(arg, name+"=") {
+		v := strings.TrimSpace(strings.TrimPrefix(arg, name+"="))
+		if v == "" {
+			return "", fmt.Errorf("%s 後面缺值", name)
+		}
+		return v, nil
+	}
+	if *i+1 >= len(args) {
+		return "", fmt.Errorf("%s 後面缺值", name)
+	}
+	*i++
+	v := strings.TrimSpace(args[*i])
+	if v == "" {
+		return "", fmt.Errorf("%s 後面缺值", name)
+	}
+	return v, nil
+}
+
 // parseHeadlessArgs parses either of the two modes:
 //
 //	--headless <taskID> [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]
@@ -86,6 +115,20 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 			o.skipSlack = true
 		case a == "--branch":
 			o.branchOnly = true
+		case a == "--release":
+			o.releaseMode = true
+		case a == "--project", strings.HasPrefix(a, "--project="):
+			v, err := flagValue(a, "--project", args, &i)
+			if err != nil {
+				return headlessOpts{}, err
+			}
+			o.projectKey = v
+		case a == "--version", strings.HasPrefix(a, "--version="):
+			v, err := flagValue(a, "--version", args, &i)
+			if err != nil {
+				return headlessOpts{}, err
+			}
+			o.version = v
 		case a == "--skip-reviewer":
 			o.skipReviewer = true
 			sawSkipReviewer = true
@@ -135,8 +178,28 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 			}
 		}
 	}
-	if !haveID {
-		return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]")
+	// release 模式沒有工作項可以推，靠 --project / --version 定位，所以它的必填
+	// 條件跟另外兩種模式完全不同，先擋掉組合錯誤再檢查 ID。
+	if o.releaseMode {
+		if o.createMode() || o.branchOnly {
+			return headlessOpts{}, fmt.Errorf("--release 不能跟 --new/--branch 一起用")
+		}
+		if haveID || len(o.extraIDs) > 0 {
+			return headlessOpts{}, fmt.Errorf("--release 不吃工作項 ID（發版 PR 不掛工作項，與互動版一致）")
+		}
+		if o.projectKey == "" || o.version == "" {
+			return headlessOpts{}, fmt.Errorf("--release 需要 --project <對應名> 跟 --version <x.y.z>")
+		}
+		if !releaseVersionRe.MatchString(o.version) {
+			return headlessOpts{}, fmt.Errorf("版號格式要是 x.y.z（收到 %q）", o.version)
+		}
+	} else {
+		if o.projectKey != "" || o.version != "" {
+			return headlessOpts{}, fmt.Errorf("--project/--version 只有 --release 模式會用到")
+		}
+		if !haveID {
+			return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]  或  vlui --headless --release --project <對應名> --version <x.y.z>")
+		}
 	}
 	if o.reviewerEmail != "" && sawSkipReviewer {
 		return headlessOpts{}, fmt.Errorf("--reviewer 跟 --skip-reviewer 不能同時給")
@@ -209,10 +272,141 @@ func runHeadless(args []string) int {
 		return exitHeadlessFail
 	}
 	r := &headlessRun{cfg: cfg, opts: opts}
-	if opts.createMode() {
+	switch {
+	case opts.releaseMode:
+		return r.executeRelease()
+	case opts.createMode():
 		return r.executeCreate()
 	}
 	return r.execute()
+}
+
+// executeRelease opens the master + develop PRs for an existing release/vX.Y.Z
+// branch. It deliberately does NOT run release.sh: that script creates the
+// branch, bumps the version and runs a prod build (minutes), and its ERR trap
+// waits on `read -p`, which would hang forever where stdin never delivers.
+// Running it stays a separate, watched step; headless only does the PR pair.
+func (r *headlessRun) executeRelease() int {
+	mapping, ok := r.cfg.Mappings[r.opts.projectKey]
+	if !ok {
+		return r.fail(exitHeadlessFail, "專案對應",
+			fmt.Errorf("設定裡沒有 %q 這個對應（目前有: %s）；要新增請跑互動模式的 /init",
+				r.opts.projectKey, strings.Join(sortedMappingKeys(r.cfg.Mappings), ", ")))
+	}
+	r.mapKey, r.mapping = r.opts.projectKey, mapping
+	r.branchName = r.opts.releaseBranch()
+	r.baseBranch = "master" // 發版固定對 master + develop 兩邊，與互動版一致
+
+	// 分支必須已經存在——不存在就是 release.sh 還沒跑（或版號打錯），這種情況
+	// 硬建一個空分支只會製造出一張沒有內容的 PR，所以直接擋下來。
+	refs := listRefsCmd(r.cfg.AzureOrg, mapping.AzureProject, mapping.AzureRepository)().(refsMsg)
+	if refs.err != nil {
+		return r.fail(exitHeadlessFail, "取得分支清單", refs.err)
+	}
+	found := false
+	for _, ref := range refs.refs {
+		if strings.EqualFold(strings.TrimPrefix(ref.name, "refs/heads/"), r.branchName) {
+			found = true
+			break
+		}
+	}
+	if !found {
+		return r.fail(exitHeadlessNeedsCommits, "檢查發版分支",
+			fmt.Errorf("origin 上找不到 %s；請先在該專案跑 release.sh %s（它會建分支、改版號、build 並 push），跑完確認正常再重跑這條指令",
+				r.branchName, r.opts.version))
+	}
+	r.branchReal = true
+	r.reused = true
+
+	if r.opts.reviewerEmail != "" {
+		r.chosenRev = reviewer{
+			email:   r.opts.reviewerEmail,
+			slackID: slackIDFor(r.opts.reviewerEmail, r.cfg.Slack.Members),
+		}
+	}
+
+	desc := "Release v" + r.opts.version
+	var prResult string
+	if r.opts.dryRun {
+		r.prURL = "DRY-RUN"
+	} else {
+		msg := createReleasePRsCmd(r.cfg.AzureOrg, mapping.AzureProject, mapping.AzureRepository,
+			r.branchName, desc, nil, r.chosenRev)().(releasePRsMsg)
+		if msg.err != nil {
+			// master 成功、develop 失敗時 masterURL 有值——一定要印出來，
+			// 否則使用者不知道已經有一張 PR 在了，重跑會變成兩張。
+			r.prURL = msg.masterURL
+			return r.fail(exitHeadlessFail, "建立發版 PR", msg.err)
+		}
+		r.prURL = msg.masterURL + "\n     develop: " + msg.developURL
+		r.reviewerErr = msg.reviewerErr
+		prResult = msg.prResult
+	}
+
+	slackFailed := false
+	switch {
+	case r.opts.skipSlack:
+		r.slackState = "略過 (--skip-slack)"
+	case r.chosenRev.slackID == "":
+		r.slackState = "略過 (沒有指定 reviewer，或 reviewer 沒有對應 Slack 帳號)"
+	case !(model{cfg: r.cfg}).slackConfigured():
+		r.slackState = "略過 (config 沒有設定 Slack token/channel)"
+	case r.opts.dryRun:
+		r.slackState = "[DRY RUN] 會通知 " + r.chosenRev.email
+	default:
+		sd := slackNotifyCmd(r.cfg.SlackToken, r.cfg.Slack.Channel, r.chosenRev.slackID, prResult)().(slackDoneMsg)
+		if sd.err != nil {
+			r.slackState = "失敗: " + sd.err.Error()
+			slackFailed = true
+		} else {
+			r.slackState = "已通知 #" + r.cfg.Slack.Channel
+		}
+	}
+
+	fmt.Println(formatHeadlessReleaseSummary(r, true, "", nil))
+	if slackFailed {
+		return exitHeadlessSlackFailed
+	}
+	return exitHeadlessOK
+}
+
+// formatHeadlessReleaseSummary reports the release run in plain text.
+func formatHeadlessReleaseSummary(r *headlessRun, ok bool, failPhase string, failErr error) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "發版 v%s\n", r.opts.version)
+	if r.mapKey != "" {
+		fmt.Fprintf(&b, "專案對應: %s -> %s/%s\n", r.mapKey, r.mapping.AzureProject, r.mapping.AzureRepository)
+	}
+	if r.branchName != "" {
+		state := "origin 上不存在"
+		if r.branchReal {
+			state = "已存在（release.sh 建的）"
+		}
+		fmt.Fprintf(&b, "發版分支: %s (%s)\n", r.branchName, state)
+	}
+	if r.opts.reviewerEmail != "" {
+		fmt.Fprintf(&b, "reviewer: %s\n", r.opts.reviewerEmail)
+	} else {
+		b.WriteString("reviewer: 略過 (未指定 --reviewer)\n")
+	}
+	if r.reviewerErr != "" {
+		fmt.Fprintf(&b, "reviewer 警告: %s\n", r.reviewerErr)
+	}
+	if r.prURL != "" {
+		fmt.Fprintf(&b, "PR: master: %s\n", r.prURL)
+	}
+	if r.slackState != "" {
+		fmt.Fprintf(&b, "Slack: %s\n", r.slackState)
+	}
+	switch {
+	case !ok:
+		fmt.Fprintf(&b, "結果: 失敗 (%s): %v\n", failPhase, failErr)
+	case r.opts.dryRun:
+		b.WriteString("結果: 模擬完成 (沒有任何寫入)\n")
+	default:
+		b.WriteString("結果: 成功 (master 與 develop 兩張 PR 都建好)\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // createOutcome is one title's fate, kept so the summary can report every title
@@ -518,9 +712,12 @@ func (r *headlessRun) execute() int {
 }
 
 func (r *headlessRun) fail(code int, phase string, err error) int {
-	if r.opts.createMode() {
+	switch {
+	case r.opts.releaseMode:
+		fmt.Println(formatHeadlessReleaseSummary(r, false, phase, err))
+	case r.opts.createMode():
 		fmt.Println(formatHeadlessCreateSummary(r, false, phase, err))
-	} else {
+	default:
 		fmt.Println(formatHeadlessSummary(r, false, phase, err))
 	}
 	fmt.Fprintf(os.Stderr, "headless 失敗 (%s): %v\n", phase, err)
