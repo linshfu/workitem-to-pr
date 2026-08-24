@@ -1,6 +1,10 @@
 package main
 
-import "testing"
+import (
+	"errors"
+	"strings"
+	"testing"
+)
 
 func TestIsHeadless(t *testing.T) {
 	cases := []struct {
@@ -286,6 +290,17 @@ func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 			t.Errorf("got %+v", o)
 		}
 	})
+}
+
+func TestSlackFailNote(t *testing.T) {
+	got := slackFailNote(errors.New("account_inactive"))
+	// 原始錯誤要留著（診斷用），而且一定要指向 /init——token 存在 config.local.json，
+	// headless 自己不寫設定，不講的話使用者不知道該去哪修。
+	for _, want := range []string{"account_inactive", "/init", "config.local.json"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("slackFailNote() = %q, 少了 %q", got, want)
+		}
+	}
 }
 
 func TestParseHeadlessArgsHotfixMode(t *testing.T) {

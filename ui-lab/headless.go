@@ -464,13 +464,13 @@ func (r *headlessRun) hotfixStepPRs() int {
 	case r.chosenRev.slackID == "":
 		r.slackState = "略過 (沒有指定 reviewer，或 reviewer 沒有對應 Slack 帳號)"
 	case !(model{cfg: r.cfg}).slackConfigured():
-		r.slackState = "略過 (config 沒有設定 Slack token/channel)"
+		r.slackState = "略過 (config 沒有設定 Slack token/channel；要啟用請跑互動模式的 /init)"
 	case r.opts.dryRun:
 		r.slackState = "[DRY RUN] 會通知 " + r.chosenRev.email
 	default:
 		sd := slackNotifyCmd(r.cfg.SlackToken, r.cfg.Slack.Channel, r.chosenRev.slackID, prResult)().(slackDoneMsg)
 		if sd.err != nil {
-			r.slackState = "失敗: " + sd.err.Error()
+			r.slackState = slackFailNote(sd.err)
 			slackFailed = true
 		} else {
 			r.slackState = "已通知 #" + r.cfg.Slack.Channel
@@ -479,7 +479,7 @@ func (r *headlessRun) hotfixStepPRs() int {
 
 	fmt.Println(formatHeadlessHotfixSummary(r, true, "", nil))
 	if slackFailed {
-		return exitHeadlessSlackFailed
+		return r.slackFailedExit()
 	}
 	return exitHeadlessOK
 }
@@ -634,13 +634,13 @@ func (r *headlessRun) executeRelease() int {
 	case r.chosenRev.slackID == "":
 		r.slackState = "略過 (沒有指定 reviewer，或 reviewer 沒有對應 Slack 帳號)"
 	case !(model{cfg: r.cfg}).slackConfigured():
-		r.slackState = "略過 (config 沒有設定 Slack token/channel)"
+		r.slackState = "略過 (config 沒有設定 Slack token/channel；要啟用請跑互動模式的 /init)"
 	case r.opts.dryRun:
 		r.slackState = "[DRY RUN] 會通知 " + r.chosenRev.email
 	default:
 		sd := slackNotifyCmd(r.cfg.SlackToken, r.cfg.Slack.Channel, r.chosenRev.slackID, prResult)().(slackDoneMsg)
 		if sd.err != nil {
-			r.slackState = "失敗: " + sd.err.Error()
+			r.slackState = slackFailNote(sd.err)
 			slackFailed = true
 		} else {
 			r.slackState = "已通知 #" + r.cfg.Slack.Channel
@@ -649,7 +649,7 @@ func (r *headlessRun) executeRelease() int {
 
 	fmt.Println(formatHeadlessReleaseSummary(r, true, "", nil))
 	if slackFailed {
-		return exitHeadlessSlackFailed
+		return r.slackFailedExit()
 	}
 	return exitHeadlessOK
 }
@@ -974,14 +974,14 @@ func (r *headlessRun) execute() int {
 	case r.chosenRev.slackID == "":
 		r.slackState = "略過 (沒有指定 reviewer，或 reviewer 沒有對應 Slack 帳號)"
 	case !(model{cfg: r.cfg}).slackConfigured():
-		r.slackState = "略過 (config 沒有設定 Slack token/channel)"
+		r.slackState = "略過 (config 沒有設定 Slack token/channel；要啟用請跑互動模式的 /init)"
 	case r.opts.dryRun || !r.branchReal:
 		r.slackState = "[DRY RUN] 會通知 " + r.chosenRev.email
 	default:
 		prResult := prResultText(r.mapping.AzureProject, r.baseBranch, r.prURL, r.branchName, r.prID)
 		sd := slackNotifyCmd(r.cfg.SlackToken, r.cfg.Slack.Channel, r.chosenRev.slackID, prResult)().(slackDoneMsg)
 		if sd.err != nil {
-			r.slackState = "失敗: " + sd.err.Error()
+			r.slackState = slackFailNote(sd.err)
 			slackFailed = true
 		} else {
 			r.slackState = "已通知 #" + r.cfg.Slack.Channel
@@ -990,9 +990,25 @@ func (r *headlessRun) execute() int {
 
 	fmt.Println(formatHeadlessSummary(r, true, "", nil))
 	if slackFailed {
-		return exitHeadlessSlackFailed
+		return r.slackFailedExit()
 	}
 	return exitHeadlessOK
+}
+
+// slackFailNote 是三條流程共用的 Slack 失敗說明。最常見的原因是 token 失效或被停用
+// （Slack 會回 account_inactive），而 token 存在 config.local.json、只有互動模式的
+// /init 會寫，所以修法一律是去跑 /init 重新設定，headless 自己不寫設定。
+func slackFailNote(err error) string {
+	return "失敗: " + err.Error() +
+		"（多半是 Slack token 失效或被停用；token 存在 config.local.json，請跑互動模式的 /init 重新設定）"
+}
+
+// slackFailedExit 收尾 exit 4：PR 已經建好了，只有通知沒發出去。額外印一行到 stderr，
+// 讓只監看 stderr 的排程器也收得到訊號——但務必不要把它當成「PR 失敗」去重跑。
+func (r *headlessRun) slackFailedExit() int {
+	fmt.Fprintln(os.Stderr, "headless 警告 (exit 4): PR 已建立，但 Slack 通知失敗。"+
+		"不要重跑（會多開一張 PR）；請跑 /init 重設 Slack token，或手動把 PR 連結貼到頻道")
+	return exitHeadlessSlackFailed
 }
 
 func (r *headlessRun) fail(code int, phase string, err error) int {
