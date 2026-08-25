@@ -1,0 +1,142 @@
+{
+  "skill_name": "vlui-headless",
+  "evals": [
+    {
+      "id": 0,
+      "name": "diagnose-exit-3",
+      "prompt": "我跑 nvl --headless 35800 結果吐這個出來，exit code 是 3，什麼意思？要重跑幾次才會成功？\n\n分支: task/35800-標籤篩選改用標籤統計 (重用既有, base=develop)\ncommit: 分支還沒 push 到遠端\n結果: 失敗 (commit 檢查): 分支 task/35800-標籤篩選改用標籤統計 還沒 push 到遠端，請先 push 再重跑",
+      "expected_output": "解釋 exit 3 是「在等人先 push」而不是工具故障，重跑不會有幫助，要先 git push 該分支；並說明 exit 3 跟 exit 1 是刻意分開的（好讓自動化區分告警 vs 等人）。不應該叫使用者一直重跑或說是 bug。",
+      "files": [],
+      "assertions": [
+        "正確指出 exit 3 的意思是分支還沒 push 到遠端、需要人先 push（不是工具壞掉）",
+        "明確說明重跑不會解決問題（要先 push 才有意義），沒有建議盲目重試 N 次",
+        "提供了可執行的下一步（push 該分支後再重跑），例如 git push 指令",
+        "沒有錯誤地把 exit 3 說成 PR 建立失敗或 Slack 失敗"
+      ]
+    },
+    {
+      "id": 1,
+      "name": "wrong-type-pbi-id",
+      "prompt": "幫我用 nvl 把 36160 這張非互動開成 PR，不要進畫面",
+      "expected_output": "認出/查出 36160 是 Product Backlog Item 而不是 Task，說明 headless 只接受 Task 型別（會以 exit 1 拒絕），要先找出該 PBI 底下實際要處理的 Task ID。可以透過 --dry-run 或查詢工作項驗證。不應該直接聲稱已經開好 PR。",
+      "files": [],
+      "assertions": [
+        "辨識出 36160 是 Product Backlog Item / 不是 Task 型別",
+        "說明 headless 模式只接受 Task 型別的工作項，PBI 會被拒絕（或會以 exit 1 失敗）",
+        "建議了正確的下一步（找出該 PBI 底下的 Task ID，或改用互動模式挑選）",
+        "沒有謊稱已經成功建立 PR 或發出 Slack 通知"
+      ]
+    },
+    {
+      "id": 2,
+      "name": "ci-command-with-flags",
+      "prompt": "我想在排程器裡自動跑 vlui 開 PR，reviewer 固定指定 tony，slack 通知不要發。指令怎麼下？另外我想知道哪些 exit code 需要讓排程器告警、哪些不用",
+      "expected_output": "組出 `nvl --headless <taskID> --reviewer tony@wishingsoft.com --skip-slack`，並依 exit code 分類告警策略：0 不用理；2 是參數寫錯要修指令（且保證無副作用）；3 是在等人 commit/push，不該當故障告警（可晚點重試）；1 要告警；4 特別說明 PR 已建立、不可重跑否則會開兩張 PR。",
+      "files": [],
+      "assertions": [
+        "指令包含 --headless、--reviewer（email 為 tony@wishingsoft.com）與 --skip-slack",
+        "說明 exit 0 代表成功、exit 1 屬於需要告警的一般失敗",
+        "正確說明 exit 3 是在等人 commit/push，不應該當工具故障處理（可延後重試）",
+        "正確說明 exit 4 是 PR 已建立但 Slack 失敗，並警告不要重跑（會重複開 PR）",
+        "有提到 exit 2 是參數錯誤（在碰 az/git 前結束、無副作用）"
+      ]
+    },
+    {
+      "id": 3,
+      "name": "feature-hierarchy-creation",
+      "prompt": "Feature 36261 底下我要開 5 張前端 task，標題大概是標籤查詢API改版、我的最愛列表、法規守規性報表、符合性判別、新增編輯查核任務這幾個，用 headless 幫我跑掉",
+      "expected_output": "認出 36261 是 Feature，而 Feature 底下該接 PBI 不是 Task，所以不能直接建 5 張 Task；要先在 Feature 下建一張前端 PBI，拿到新 ID 後再用那個 ID 建底下的 5 張 Task（兩次呼叫）。標題套 [Legal][前端] 慣例（Legal 來自 Area Path）。應該先用 --dry-run 或先把標題列給使用者確認，不要未經同意就真的建。",
+      "files": [],
+      "assertions": [
+        "辨識出 36261 是 Feature，並指出 Feature 底下該建 PBI 而不是直接建 Task",
+        "提出正確的兩階段做法：先建前端 PBI，再用新 PBI 的 ID 建底下的 Task",
+        "指令使用 --new 旗標（例如 nvl --headless 36261 --new \"...\"），而非虛構的旗標",
+        "標題套用 [Legal][前端] 慣例（正確從 Area Path ESHClouds\\1.Product\\Legal 推出 Legal 標籤）",
+        "有先 --dry-run 或先把標題列給使用者確認，沒有未經同意就直接建立真實工作項"
+      ]
+    },
+    {
+      "id": 4,
+      "name": "create-under-task-rejected",
+      "prompt": "nvl --headless 36230 --new \"再切一張小的子任務\" 這樣跑會怎樣？36230 是一張 Task",
+      "expected_output": "說明 Task 是階層最底層，底下不支援建子單，這條指令會以 exit 1 的階層檢查失敗收場；要建同層的單應該對它的父 PBI 下 --new。",
+      "files": [],
+      "assertions": [
+        "明確說明 Task 底下不能再建子單（會失敗，exit 1 / 階層檢查）",
+        "指出正確做法是對該 Task 的父 PBI 下 --new 來建同層的 Task",
+        "沒有錯誤聲稱這條指令會成功建出子任務"
+      ]
+    },
+    {
+      "id": 7,
+      "name": "branch-boundary-shared-layer",
+      "prompt": "PBI 36344 底下有 5 張 Task：36346 是共用層（repository/models/enums）＋適用性清單，36347 我的最愛、36348 守規性報表、36349 符合性判別、36350 查核任務挑法規。那 4 個頁面的改動都 import 共用層新增的 enum 跟 interface。code 都在 working tree 還沒 commit、也還沒有分支。幫我開分支 commit 上去並開 PR。",
+      "expected_output": "指出那 4 張頁面單的改動編譯上相依於共用層，所以不能切成 5 個各自從 develop 出來的分支（後 4 個會編譯不過、CI 會紅）。正確做法是一個分支、一張 PR 掛全部 5 張單，共用層那張當主要（決定分支名）並且是第一個 commit；想區分哪些改動屬於哪張單就在同一分支裡分多個 commit。最後 nvl --headless 36346 36347 36348 36349 36350 開一張 PR。",
+      "files": [],
+      "assertions": [
+        "明確指出 4 張頁面單編譯相依於共用層，不能各自切一個從 develop 出來的分支",
+        "結論是一個分支 + 一張 PR 掛多張單，而不是 5 個分支 5 張 PR",
+        "共用層那張（36346）當主要／決定分支名，且在分支裡最先 commit",
+        "開 PR 的指令一次帶上多個 task ID（例如 nvl --headless 36346 36347 36348 36349 36350）",
+        "沒有主張「一張 Task 一定要一個分支一張 PR」而把相依的改動硬切開"
+      ]
+    },
+    {
+      "id": 8,
+      "name": "release-sh-blocked-fallback",
+      "prompt": "幫我發 Legal v7.14.5。我跑你之前那套：先 release.sh 再 headless 雙 PR。結果你執行 bash release.sh 7.14.5 的時候被權限系統擋下來了（它會 build 跟 push），現在怎麼辦？",
+      "expected_output": "不直接放棄也不叫使用者自己跑，先走拆步等效執行：讀懂該專案的 release.sh 與 npm run release 指到的腳本，然後逐步以單一指令執行（checkout develop + pull → checkout -b release/v7.14.5 → 改版號（npm run release 或用編輯工具改腳本會改的檔案）→ npm run build:prod 驗證 → git status 確認只有版號檔被改 → commit 訊息逐字 release: v7.14.5 → push）。build 失敗就停下回報不 push。兩條路都被擋才把指令交還使用者。",
+      "files": [],
+      "assertions": [
+        "沒有因為整支腳本被擋就直接停住把工作丟回給使用者（那是最後一步，不是第一反應）",
+        "拆步之前先讀該專案的 release.sh 與 npm run release 實際指到的腳本，而不是憑通用印象做",
+        "等效流程保留 build:prod 這個驗證關卡，沒有跳過",
+        "commit 訊息逐字使用 release: v7.14.5，沒有加多餘的行；且 commit 前用 git status 確認只有版號相關檔案被改",
+        "沒有把「被權限系統擋下」誤判成 release.sh 本身壞掉或 headless 的 bug"
+      ]
+    },
+    {
+      "id": 6,
+      "name": "stale-binary-preflight",
+      "prompt": "幫我用 nvl --headless 36346 --dry-run 看一下這張單的狀況",
+      "expected_output": "動手前先確認該執行檔支不支援 --headless（用不執行的方式檢查，例如在 binary 裡找 --headless 字串），因為舊版執行檔遇到這個旗標不會報錯、會靜默開啟互動 TUI 並卡住。若不支援就改走 cd C:/test/very-lazy/ui-lab && go run . --headless 36346 --dry-run。不應該直接盲下 nvl --headless 然後把 shell 卡死。",
+      "files": [],
+      "assertions": [
+        "在執行前先驗證該執行檔是否支援 --headless，而不是直接下 nvl --headless 試",
+        "說明舊版執行檔的失敗模式是靜默開啟互動 TUI / 卡住，不是報錯",
+        "當偵測到不支援時，提出改用 ui-lab 原始碼模式（go run . --headless …）的替代方案",
+        "沒有把「卡住不回應」誤判成工作項查詢慢或網路問題"
+      ]
+    },
+    {
+      "id": 5,
+      "name": "split-uncommitted-work-onto-branch",
+      "prompt": "PBI 36344 底下 5 張 Task 都開好了，code 我寫在 working tree 還沒 commit，也還沒有任何分支。先挑共用層那張，開分支把屬於它的檔案 commit 上去，push 完幫我開 PR。其他單的檔案先留著不要動。",
+      "expected_output": "先 git status 看有哪些未提交改動，用 nvl --headless <taskID> --dry-run 取得工具推導的分支名（不自己拼），本機 git checkout -b 該分支（未提交改動會跟著過去），只 git add 屬於共用層那張單的檔案（access/repository、shared/models、shared/enums 這類），用該 repo 既有的 <type>: <中文> 慣例 commit，push -u origin，最後才跑 nvl --headless <taskID> 開 PR。應該說明共用層要先做的原因（其他頁面 import 它）。不應該 git add . 把全部檔案一起 commit。",
+      "files": [],
+      "assertions": [
+        "有先查 working tree 狀態（git status / git diff）再動作，而不是直接 commit",
+        "分支名來自 --dry-run 的輸出或明確說明要從工具取得，沒有自己憑規則拼湊分支名",
+        "採用本機先開分支的順序（git checkout -b → add 子集 → commit → push → 再跑 headless 開 PR），而不是先跑 headless 撞 exit 3",
+        "只 add 屬於該張單的檔案子集，明確避免 git add . / git add -A 把其他單的改動一起提交",
+        "commit 訊息符合該 repo 既有慣例（例如 Conventional Commits 加中文描述），且有說明是查過 git log 而非憑印象",
+        "有指出共用層（repository/models/enums）要最先 commit 的理由：其他頁面的改動 import 它",
+        "沒有謊稱已經完成實際上沒做的步驟（例如未 push 就說 PR 開好了）"
+      ]
+    },
+    {
+      "id": 9,
+      "name": "release-pr-required-links",
+      "prompt": "chem 要發 v3.2.0，release.sh 我已經跑完、release/v3.2.0 也在 origin 上了。幫我用 headless 開雙 PR：nvl --headless --release --project chem --version 3.2.0 這樣下對嗎？",
+      "expected_output": "指出這樣下會在參數階段被擋（exit 2、碰不到 az）：發版開 PR 必須帶至少一個工作項 ID（通常是那張 Release 單）跟明確的 reviewer 決定（--reviewer <email> 或 --skip-reviewer）。說明原因：master 分支原則有「PR 必須掛工作項」的 required check，沒掛的 PR 建得出來但永遠合不了；發版 PR 沒 reviewer 就沒人核准、會一直卡在 Active。正確指令形如 nvl --headless --release --project chem --version 3.2.0 <Release單ID> --reviewer <email>。缺 Release 單號或 reviewer 人選時應該先問使用者，而不是自己編一個或默默用 --skip-reviewer。",
+      "files": [],
+      "assertions": [
+        "指出原指令缺工作項 ID 跟 reviewer 決定，會以 exit 2 在參數階段被擋（無副作用），不會開出 PR",
+        "說明掛工作項是 master 分支原則的 required check——沒掛的 PR 建得出來但永遠不能合併",
+        "說明 reviewer 必須明確決定（--reviewer 或 --skip-reviewer），發版 PR 沒 reviewer 會卡在 Active 沒人核准",
+        "給出的修正指令同時包含工作項 ID 與 reviewer 決定",
+        "缺 Release 單號或 reviewer email 時選擇問使用者，沒有擅自編造或默默改用 --skip-reviewer"
+      ]
+    }
+  ]
+}

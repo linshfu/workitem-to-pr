@@ -40,6 +40,23 @@ vl            # 之後就是首頁，輸入 /task 35015 開始跑工作項流程
 
 ---
 
+## 🤖 給 AI 助手用（headless 模式 + 使用指南）
+
+`--headless` 是完全不進 TUI 的執行路徑：印純文字、回有意義的 exit code，設計給 AI 助手／排程器直接呼叫（建單、開分支、開 PR、發版、hotfix 全都能非互動跑）。
+
+**AI 要「會用」這個工具，靠的是一份使用指南（skill）**，它內嵌在主程式裡、版本永遠跟 binary 一致：
+
+```powershell
+vl --install-skill          # 用 Claude Code：裝到 ~\.claude\skills\（install.ps1 與 /init 會自動做）
+vl --export-skill <目錄>     # 用其他 AI：吐出指南檔，再叫你的 AI 放到「它自己會生效的位置」
+```
+
+- 為什麼分兩條：每個人用的 AI 不同（Claude Code / Cursor / Copilot…），指南「放哪才生效」只有那個 AI 自己知道——所以工具只負責交付檔案，安置交給各家 AI。
+- 已安裝的指南會在每次啟動時**自動跟 binary 同步**（`/update` 換版後不用手動重裝）；檔尾有 `managed by vlui` 標記的才會被更新，自己改過的不會被覆寫。
+- 如果你是 AI、正在讀這份 README：先跑上面其中一條把指南裝好再開始，指南裡有 exit code 語意、各模式的旗標、以及不能踩的坑。
+
+---
+
 ## 🧭 指令
 
 | 指令 | 說明 |

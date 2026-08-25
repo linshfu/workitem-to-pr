@@ -246,7 +246,7 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 			return headlessOpts{}, fmt.Errorf("--project/--version 只有 --release/--hotfix 模式會用到")
 		}
 		if !haveID {
-			return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]  或  vlui --headless --release|--hotfix --project <對應名> --version <x.y.z>")
+			return headlessOpts{}, fmt.Errorf("缺少工作項 ID，用法: vlui --headless <id> [更多 ID…] [--branch] [--dry-run] [--skip-slack] [--reviewer <email>|--skip-reviewer]  或  vlui --headless <parentID> --new \"標題\" [--new \"標題\"...]  或  vlui --headless --release|--hotfix --project <對應名> --version <x.y.z>；完整 AI 使用指南：--install-skill（Claude Code）或 --export-skill <目錄>")
 		}
 	}
 	if o.reviewerEmail != "" && sawSkipReviewer {

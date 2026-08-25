@@ -183,6 +183,7 @@ type model struct {
 	moreCursor int
 
 	writtenPath string
+	skillNote   string // init 完成時安裝 AI 使用指南的結果，顯示在完成畫面
 	errMsg      string
 
 	// slack setup (in /init)
@@ -800,6 +801,8 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if cfg, ok := loadConfig(); ok {
 				m.cfg, m.cfgOK = cfg, ok
 			}
+			// init 完成順手裝 AI 使用指南（Claude Code 的 skill）；裝不成只記一行不擋流程
+			m.skillNote = installSkillNote()
 		}
 		return m, nil
 	case updateMsg:
@@ -2953,6 +2956,9 @@ func (m model) viewInit() string {
 	case stDone:
 		body.WriteString(styleBold(okCol, "完成 🎉") + "\n\n")
 		body.WriteString(styleFg(muted, "已寫入：") + "\n" + m.writtenPath)
+		if m.skillNote != "" {
+			body.WriteString("\n" + styleFg(dim, m.skillNote))
+		}
 		if m.slackSkipped {
 			body.WriteString("\n\n" + styleFg(dim, "（Slack 未設定，之後 /init 可補）"))
 		}
@@ -3352,6 +3358,10 @@ func (m model) taskHint() string {
 }
 
 func main() {
+	if code, handled := handleSkillFlags(os.Args[1:]); handled {
+		os.Exit(code)
+	}
+	autoRefreshSkill() // 已安裝的 AI 指南跟著這顆 binary 的內嵌版同步（帶標記才動）
 	if isHeadless(os.Args[1:]) {
 		os.Exit(runHeadless(os.Args[1:]))
 	}

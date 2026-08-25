@@ -88,7 +88,16 @@ if (-not $env:VL_SKIP_PATH) {
 if (($env:Path -split ';') -notcontains $InstallDir) { $env:Path = "$env:Path;$InstallDir" }
 Ok "指令名稱：$name"
 
-# 4) done
+# 4) AI usage guide (skill) — installs into Claude Code's user-level skills dir
+#    when ~\.claude exists; other AI assistants can get it via --export-skill.
+if (Test-Path (Join-Path $env:USERPROFILE '.claude')) {
+    Step "安裝 AI 使用指南（skill）"
+    try { & $dest --install-skill | ForEach-Object { Write-Host "   $_" -ForegroundColor Gray } } catch { Note "skill 安裝失敗（不影響主程式）：$($_.Exception.Message)" }
+} else {
+    Note "未偵測到 Claude Code（~\.claude）。其他 AI 助手請跑： $name --export-skill <目錄>，再叫你的 AI 把檔案放到它會生效的位置。"
+}
+
+# 5) done
 Write-Host ""
 Write-Host "  安裝完成。" -ForegroundColor Green
 Write-Host "  開一個新的終端機視窗，輸入 " -NoNewline; Write-Host $name -ForegroundColor Cyan -NoNewline
