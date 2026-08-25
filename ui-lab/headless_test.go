@@ -210,7 +210,8 @@ func TestParseHeadlessArgsBranchOnly(t *testing.T) {
 
 func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 	t.Run("project and version, separate values", func(t *testing.T) {
-		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal", "--version", "7.14.4"})
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
+			"--version", "7.14.4", "35718", "--reviewer", "a@b.com"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -223,7 +224,8 @@ func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 	})
 
 	t.Run("equals form", func(t *testing.T) {
-		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project=legal", "--version=1.2.3"})
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project=legal", "--version=1.2.3",
+			"35718", "--skip-reviewer"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -253,10 +255,32 @@ func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 		}
 	})
 
-	t.Run("rejects work item ids", func(t *testing.T) {
-		_, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal", "--version", "1.2.3", "36346"})
+	t.Run("links work items", func(t *testing.T) {
+		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
+			"--version", "1.2.3", "35718", "35719", "--reviewer", "a@b.com"})
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		got := o.linkedIDs()
+		if len(got) != 2 || got[0] != 35718 || got[1] != 35719 {
+			t.Errorf("linkedIDs() = %v, want [35718 35719]", got)
+		}
+	})
+
+	t.Run("requires a work item", func(t *testing.T) {
+		// master 分支原則要求 PR 掛工作項，沒掛的 PR 會卡在 required check 不能合併，
+		// 所以在碰 az 之前就要擋下來，而不是開一張不能用的 PR。
+		_, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
+			"--version", "1.2.3", "--reviewer", "a@b.com"})
 		if err == nil {
-			t.Fatal("expected error: --release takes no work item id")
+			t.Fatal("expected error: --release 開 PR 需要工作項 ID")
+		}
+	})
+
+	t.Run("requires an explicit reviewer decision", func(t *testing.T) {
+		if _, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
+			"--version", "1.2.3", "35718"}); err == nil {
+			t.Fatal("expected error: 沒給 --reviewer 也沒給 --skip-reviewer")
 		}
 	})
 
@@ -282,7 +306,7 @@ func TestParseHeadlessArgsReleaseMode(t *testing.T) {
 
 	t.Run("reviewer and dry-run allowed", func(t *testing.T) {
 		o, err := parseHeadlessArgs([]string{"--headless", "--release", "--project", "legal",
-			"--version", "1.2.3", "--reviewer", "a@b.com", "--dry-run"})
+			"--version", "1.2.3", "35718", "--reviewer", "a@b.com", "--dry-run"})
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
@@ -315,7 +339,8 @@ func TestParseHeadlessArgsHotfixMode(t *testing.T) {
 		}{
 			{"branch step", []string{"--branch"}, true, false},
 			{"bump step", []string{"--bump"}, false, true},
-			{"pr step", nil, false, false},
+			// 開 PR 這步一定要有工作項與 reviewer 決定，見下面各自的案例。
+			{"pr step", []string{"35718", "--reviewer", "a@b.com"}, false, false},
 		}
 		for _, c := range cases {
 			o, err := parseHeadlessArgs(append(append([]string{}, base...), c.extra...))
@@ -369,12 +394,36 @@ func TestParseHeadlessArgsHotfixMode(t *testing.T) {
 		}
 	})
 
-	t.Run("pr step accepts reviewer", func(t *testing.T) {
-		o, err := parseHeadlessArgs(append(append([]string{}, base...), "--reviewer", "a@b.com"))
+	t.Run("pr step accepts reviewer and work items", func(t *testing.T) {
+		o, err := parseHeadlessArgs(append(append([]string{}, base...), "35718", "--reviewer", "a@b.com"))
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		if o.reviewerEmail != "a@b.com" || o.branchOnly || o.bump {
+			t.Errorf("got %+v", o)
+		}
+		if got := o.linkedIDs(); len(got) != 1 || got[0] != 35718 {
+			t.Errorf("linkedIDs() = %v, want [35718]", got)
+		}
+	})
+
+	t.Run("pr step requires a work item", func(t *testing.T) {
+		_, err := parseHeadlessArgs(append(append([]string{}, base...), "--reviewer", "a@b.com"))
+		if err == nil {
+			t.Fatal("expected error: master 分支原則要求 PR 掛工作項")
+		}
+	})
+
+	t.Run("pr step requires an explicit reviewer decision", func(t *testing.T) {
+		if _, err := parseHeadlessArgs(append(append([]string{}, base...), "35718")); err == nil {
+			t.Fatal("expected error: 沒給 --reviewer 也沒給 --skip-reviewer")
+		}
+		// 明確說不要就放行——沉默略過才是問題，不是「不要 reviewer」這件事本身。
+		o, err := parseHeadlessArgs(append(append([]string{}, base...), "35718", "--skip-reviewer"))
+		if err != nil {
+			t.Fatalf("--skip-reviewer 應該要能明確略過: %v", err)
+		}
+		if !o.skipReviewer || o.reviewerEmail != "" {
 			t.Errorf("got %+v", o)
 		}
 	})

@@ -213,18 +213,33 @@ func parseHeadlessArgs(args []string) (headlessOpts, error) {
 		if o.branchOnly && o.bump {
 			return headlessOpts{}, fmt.Errorf("--branch 跟 --bump 是不同的步驟，不能同時給")
 		}
-		if haveID || len(o.extraIDs) > 0 {
-			return headlessOpts{}, fmt.Errorf("%s 不吃工作項 ID（發版/修補的 PR 不掛工作項，與互動版一致）", label)
-		}
 		if o.projectKey == "" || o.version == "" {
 			return headlessOpts{}, fmt.Errorf("%s 需要 --project <對應名> 跟 --version <x.y.z>", label)
 		}
 		if !releaseVersionRe.MatchString(o.version) {
 			return headlessOpts{}, fmt.Errorf("版號格式要是 x.y.z（收到 %q）", o.version)
 		}
-		// --branch / --bump 都不會建 PR，reviewer/Slack 旗標在那兩步沒有意義。
-		if (o.branchOnly || o.bump) && (o.reviewerEmail != "" || o.skipSlack || sawSkipReviewer) {
-			return headlessOpts{}, fmt.Errorf("這一步不建 PR，不能跟 --reviewer/--skip-slack/--skip-reviewer 一起用")
+		// --branch / --bump 都不會建 PR，reviewer/Slack/工作項在那兩步沒有意義。
+		if o.branchOnly || o.bump {
+			if o.reviewerEmail != "" || o.skipSlack || sawSkipReviewer {
+				return headlessOpts{}, fmt.Errorf("這一步不建 PR，不能跟 --reviewer/--skip-slack/--skip-reviewer 一起用")
+			}
+			if haveID || len(o.extraIDs) > 0 {
+				return headlessOpts{}, fmt.Errorf("這一步不建 PR，不用給工作項 ID（開 PR 那次再給）")
+			}
+		} else {
+			// 開 PR 這步：master 分支原則要求「PR 必須掛工作項」，沒掛的話 PR 會直接
+			// 卡在 required check 不能合併。與其開一張不能用的 PR，不如在碰 az 之前擋下來。
+			if !haveID {
+				return headlessOpts{}, fmt.Errorf("%s 開 PR 需要至少一個工作項 ID（通常是那張 Release 單，例如 %s --project %s --version %s 35718）；master 的分支原則要求 PR 必須掛工作項，沒掛會卡在 required check 不能合併",
+					label, label, o.projectKey, o.version)
+			}
+			// 同理，發版 PR 沒有審核者就沒人會去按核准，會一直停在那裡。要略過必須
+			// 明講，不能靠「沒給就當作不要」——那是 /task 的預設，發版不適用。
+			if o.reviewerEmail == "" && !sawSkipReviewer {
+				return headlessOpts{}, fmt.Errorf("%s 開 PR 要指定 --reviewer <email>；發版 PR 沒有審核者就不會有人核准、也不會開 auto-complete，會一直卡著。真的不要審核者請明確加 --skip-reviewer",
+					label)
+			}
 		}
 	} else {
 		if o.projectKey != "" || o.version != "" {
@@ -447,7 +462,7 @@ func (r *headlessRun) hotfixStepPRs() int {
 		r.prURL = "DRY-RUN"
 	} else {
 		msg := createReleasePRsCmd(r.cfg.AzureOrg, r.mapping.AzureProject, r.mapping.AzureRepository,
-			r.branchName, desc, nil, r.chosenRev)().(releasePRsMsg)
+			r.branchName, desc, r.opts.linkedIDs(), r.chosenRev)().(releasePRsMsg)
 		if msg.err != nil {
 			r.prURL = msg.masterURL // master 成功、develop 失敗時要讓人看到已存在的那張
 			return r.fail(exitHeadlessFail, "建立 hotfix PR", msg.err)
@@ -534,6 +549,13 @@ func formatHeadlessHotfixSummary(r *headlessRun, ok bool, failPhase string, fail
 		if r.commitCount > 0 && !r.bumped {
 			fmt.Fprintf(&b, "⚠ 沒看到 \"release: v%s\" 這筆 commit，版號可能還沒改（要改的話先跑 --bump）\n", r.opts.version)
 		}
+		if ids := r.opts.linkedIDs(); r.opts.workItemID > 0 {
+			parts := make([]string, len(ids))
+			for i, id := range ids {
+				parts[i] = "#" + strconv.Itoa(id)
+			}
+			fmt.Fprintf(&b, "PR 掛的工作項: %s\n", strings.Join(parts, ", "))
+		}
 		if r.opts.reviewerEmail != "" {
 			fmt.Fprintf(&b, "reviewer: %s\n", r.opts.reviewerEmail)
 		} else {
@@ -615,7 +637,7 @@ func (r *headlessRun) executeRelease() int {
 		r.prURL = "DRY-RUN"
 	} else {
 		msg := createReleasePRsCmd(r.cfg.AzureOrg, mapping.AzureProject, mapping.AzureRepository,
-			r.branchName, desc, nil, r.chosenRev)().(releasePRsMsg)
+			r.branchName, desc, r.opts.linkedIDs(), r.chosenRev)().(releasePRsMsg)
 		if msg.err != nil {
 			// master 成功、develop 失敗時 masterURL 有值——一定要印出來，
 			// 否則使用者不知道已經有一張 PR 在了，重跑會變成兩張。
@@ -667,6 +689,13 @@ func formatHeadlessReleaseSummary(r *headlessRun, ok bool, failPhase string, fai
 			state = "已存在（release.sh 建的）"
 		}
 		fmt.Fprintf(&b, "發版分支: %s (%s)\n", r.branchName, state)
+	}
+	if ids := r.opts.linkedIDs(); r.opts.workItemID > 0 {
+		parts := make([]string, len(ids))
+		for i, id := range ids {
+			parts[i] = "#" + strconv.Itoa(id)
+		}
+		fmt.Fprintf(&b, "PR 掛的工作項: %s\n", strings.Join(parts, ", "))
 	}
 	if r.opts.reviewerEmail != "" {
 		fmt.Fprintf(&b, "reviewer: %s\n", r.opts.reviewerEmail)
