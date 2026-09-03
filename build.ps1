@@ -24,7 +24,7 @@ $dist = Join-Path $root 'dist'
 New-Item -ItemType Directory -Force -Path $dist | Out-Null
 $out = Join-Path $dist 'vlui.exe'
 
-Push-Location (Join-Path $root 'ui-lab')
+Push-Location (Join-Path $root 'cli')
 try {
     $env:GOOS = 'windows'; $env:GOARCH = 'amd64'
     & $go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $out .

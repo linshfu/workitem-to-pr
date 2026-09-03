@@ -20,10 +20,10 @@ jobs:
 
       - uses: actions/setup-go@v5
         with:
-          go-version-file: ui-lab/go.mod
+          go-version-file: cli/go.mod
 
       - name: Build windows/amd64
-        working-directory: ui-lab
+        working-directory: cli
         env:
           GOOS: windows
           GOARCH: amd64

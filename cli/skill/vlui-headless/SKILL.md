@@ -34,7 +34,7 @@ nvl --version
 （慢幾秒，功能一樣）：
 
 ```bash
-cd C:/test/very-lazy/ui-lab && go run . --headless <id> [旗標…]
+cd C:/test/very-lazy/cli && go run . --headless <id> [旗標…]
 ```
 
 發新版一律走 `.\release.ps1 <版號>`（CI 會把 tag 注入成 binary 版號，`--version` 跟
@@ -324,7 +324,7 @@ exit 5 同理：整批當失敗會讓人以為什麼都沒建，實際上有些�
 
 - **兩個別名不是同一個工具**：`vl` = 舊版 PowerShell（`C:\test\very-lazy\main.ps1`）；
   `nvl` = Go 版 `vlui.exe`。`--headless` 只有 Go 版有，對 `vl` 下 `--headless` 不會有用。
-  在 `C:\test\very-lazy\ui-lab` 目錄裡用 `go run . --headless <id>` 是改原始碼時的本機開發模式。
+  在 `C:\test\very-lazy\cli` 目錄裡用 `go run . --headless <id>` 是改原始碼時的本機開發模式。
 
 - **設定檔是兩份不同的檔案，而且內容不一樣**（這是目前最容易踩的坑）：
   - PS 版讀 repo 根目錄 `C:\test\very-lazy\config.json`
