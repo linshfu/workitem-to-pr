@@ -1813,7 +1813,8 @@ func nextLevelType(typ string) string {
 	switch {
 	case strings.EqualFold(typ, "Feature"), strings.EqualFold(typ, "Release"):
 		return "Product Backlog Item"
-	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"):
+	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"),
+		strings.EqualFold(typ, "Internal Bug"):
 		return "Task"
 	}
 	return ""
@@ -1826,7 +1827,8 @@ func bindTargetHint(typ string) string {
 	switch {
 	case strings.EqualFold(typ, "Feature"):
 		up = "Epic"
-	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"):
+	case strings.EqualFold(typ, "Product Backlog Item"), strings.EqualFold(typ, "Bug"),
+		strings.EqualFold(typ, "Internal Bug"):
 		up = "Feature"
 	case strings.EqualFold(typ, "Task"):
 		up = "PBI"

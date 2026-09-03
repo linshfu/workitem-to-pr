@@ -555,6 +555,7 @@ func TestNextLevelType(t *testing.T) {
 		{"Release", "Product Backlog Item"},
 		{"Product Backlog Item", "Task"},
 		{"Bug", "Task"},
+		{"Internal Bug", "Task"},
 		{"Task", ""},
 		{"feature", "Product Backlog Item"}, // case-insensitive
 		{"Epic", ""},
