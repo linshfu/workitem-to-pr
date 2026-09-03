@@ -99,12 +99,12 @@
       "id": 6,
       "name": "stale-binary-preflight",
       "prompt": "幫我用 nvl --headless 36346 --dry-run 看一下這張單的狀況",
-      "expected_output": "動手前先確認該執行檔支不支援 --headless（用不執行的方式檢查，例如在 binary 裡找 --headless 字串），因為舊版執行檔遇到這個旗標不會報錯、會靜默開啟互動 TUI 並卡住。若不支援就改走 cd C:/test/very-lazy/ui-lab && go run . --headless 36346 --dry-run。不應該直接盲下 nvl --headless 然後把 shell 卡死。",
+      "expected_output": "直接跑就好。cli-v0.6.0 起不認得的旗標一律 exit 2、不會再靜默開 TUI，所以最壞情況是印一行「不認得的參數」加 exit 2（碰不到 az/git），不是卡住。要確認版本就跑 nvl --version，它印一行 cli-vX.Y.Z 就結束。只有在懷疑本機是 cli-v0.5.0 或更早時才需要別的辦法——那些版本既沒有 --version、又還會對未知旗標開 TUI，連 --version 本身都會卡住，所以要用不執行的方式檢查 binary 裡有沒有 --version 字串，沒有就改走 cd C:/test/very-lazy/cli && go run . --headless 36346 --dry-run。",
       "files": [],
       "assertions": [
-        "在執行前先驗證該執行檔是否支援 --headless，而不是直接下 nvl --headless 試",
-        "說明舊版執行檔的失敗模式是靜默開啟互動 TUI / 卡住，不是報錯",
-        "當偵測到不支援時，提出改用 ui-lab 原始碼模式（go run . --headless …）的替代方案",
+        "知道未知旗標現在會 exit 2、不會靜默開 TUI，所以不需要為了敢不敢跑而先掃 binary",
+        "把 nvl --version 當成版本檢查的手段，而不是掃 binary 找字串",
+        "若提到舊版風險，正確指出 cli-v0.5.0 及更早連 --version 都會卡住，那種情況才用不執行的檢查",
         "沒有把「卡住不回應」誤判成工作項查詢慢或網路問題"
       ]
     },
