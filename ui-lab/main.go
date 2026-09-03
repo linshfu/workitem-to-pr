@@ -342,6 +342,45 @@ func parseInitialArgs(args []string) (name, arg string) {
 	return "", ""
 }
 
+// topLevelUsage 只列頂層入口——headless 的完整旗標在 AI 使用指南裡，別在這裡複製一份。
+const topLevelUsage = `用法:
+  vlui                                進互動 TUI（不帶參數）
+  vlui <工作項ID>                     等同 /task <工作項ID>
+  vlui /task <ID>|/pbi|/release|/hotfix|/init|/update|/help
+  vlui --headless <...>               非互動模式，完整旗標見 AI 使用指南
+  vlui --version                      印出這顆執行檔的版本
+  vlui --install-skill                安裝 AI 使用指南到 ~\.claude\skills\
+  vlui --export-skill <目錄>          匯出 AI 使用指南（給其他 AI）`
+
+// handleTopLevelFlags 攔截不進 TUI 的一次性旗標，並擋掉不認得的參數。
+// 回傳 (exit code, 有沒有攔到)；沒攔到才往下走互動 TUI。
+//
+// 「不認得的旗標一律 exit 2」是這個函式存在的主要理由。舊版遇到自己不認識的旗標
+// （例如當年剛出現的 --headless）不會報錯，會靜默開起互動畫面等按鍵——在非互動
+// shell 裡就是一個永遠不回來的指令。擋在這裡之後，以後新增任何旗標都不必再發明一次
+// 「掃 binary 找字串」的版本檢查儀式：夠新的版本會乾脆地說不認得。
+//
+// 位置刻意排在 isHeadless 之後：--version 在 headless 模式裡是發版版號
+// （--headless --release --version 5.32.2），只有非 headless 的呼叫才把它當成
+// 「印出這顆 binary 的版本」。
+func handleTopLevelFlags(args []string) (int, bool) {
+	if len(args) == 0 {
+		return 0, false
+	}
+	if args[0] == "--version" {
+		fmt.Println(version) // 一行版號，給人看跟給腳本比對用同一個字串
+		return exitHeadlessOK, true
+	}
+	for _, a := range args {
+		if strings.HasPrefix(a, "-") {
+			fmt.Fprintln(os.Stderr, "不認得的參數: "+a)
+			fmt.Fprintln(os.Stderr, topLevelUsage)
+			return exitHeadlessUsage, true
+		}
+	}
+	return 0, false
+}
+
 func (m model) Init() tea.Cmd { return tea.Batch(textinput.Blink, m.spin.Tick, m.boot) }
 
 func (m *model) refreshMatches() {
@@ -3366,6 +3405,9 @@ func main() {
 	autoRefreshSkill() // 已安裝的 AI 指南跟著這顆 binary 的內嵌版同步（帶標記才動）
 	if isHeadless(os.Args[1:]) {
 		os.Exit(runHeadless(os.Args[1:]))
+	}
+	if code, handled := handleTopLevelFlags(os.Args[1:]); handled {
+		os.Exit(code)
 	}
 	fm, err := tea.NewProgram(initialModel()).Run()
 	if err != nil {

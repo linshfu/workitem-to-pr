@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -106,4 +107,47 @@ func TestResolveMapping(t *testing.T) {
 			t.Error("expected no match, got ok=true")
 		}
 	})
+}
+
+// muteStdio 把 stdout/stderr 導到 NUL——handleTopLevelFlags 會直接印，不導掉的話
+// go test 的輸出會被用法區塊塞滿。
+func muteStdio(t *testing.T) {
+	t.Helper()
+	devNull, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatalf("開 %s 失敗: %v", os.DevNull, err)
+	}
+	origOut, origErr := os.Stdout, os.Stderr
+	os.Stdout, os.Stderr = devNull, devNull
+	t.Cleanup(func() {
+		os.Stdout, os.Stderr = origOut, origErr
+		devNull.Close()
+	})
+}
+
+func TestHandleTopLevelFlags(t *testing.T) {
+	cases := []struct {
+		name    string
+		args    []string
+		code    int
+		handled bool
+	}{
+		{"不帶參數 -> 進 TUI", nil, 0, false},
+		{"純數字 -> 進 TUI", []string{"35744"}, 0, false},
+		{"斜線指令 -> 進 TUI", []string{"/task", "35744"}, 0, false},
+		{"--version -> 印版號後 exit 0", []string{"--version"}, exitHeadlessOK, true},
+		{"不認得的旗標 -> exit 2", []string{"--bogus"}, exitHeadlessUsage, true},
+		{"旗標在指令後面也要擋", []string{"/task", "--bogus"}, exitHeadlessUsage, true},
+		// 這格是整個函式的重點：--headless 打錯字絕不能 fallback 進 TUI 卡住非互動 shell。
+		{"--headless 打錯字 -> exit 2 而不是開 TUI", []string{"--headles", "35744"}, exitHeadlessUsage, true},
+	}
+	muteStdio(t)
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			code, handled := handleTopLevelFlags(c.args)
+			if code != c.code || handled != c.handled {
+				t.Errorf("handleTopLevelFlags(%q) = (%d, %v), want (%d, %v)", c.args, code, handled, c.code, c.handled)
+			}
+		})
+	}
 }

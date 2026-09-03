@@ -5,31 +5,42 @@ description: 用 vlui（Go 版 very-lazy，別名 nvl）的 --headless 模式非
 
 # vlui --headless 使用指南
 
-## 動手前必做：確認這顆執行檔認不認 `--headless`
+## 動手前：這顆執行檔夠新嗎
 
-**這是唯一一個「跳過就會害你掛住」的步驟。** `--headless` 是後來才加的，舊版執行檔完全不
-認識這個旗標——而且它不會報錯，會**靜默開啟互動 TUI 然後卡在那裡等按鍵**。你在非互動
-shell 裡看到的就是一個永遠不回來的指令，還得去把 process 殺掉。
+**結論先講：不認得的旗標現在一律 exit 2，不會再靜默開 TUI 把你卡住。** 所以直接下
+`nvl --headless …` 是安全的——最壞情況是印一行「不認得的參數」加 exit 2（碰不到 az/git、
+保證沒有副作用），不是一個永遠不回來的指令。
 
-所以**不要**拿 `nvl --headless ...` 去試水溫。先用這個不執行、瞬間完成的檢查：
+要看版本就跑這個，它印一行 `cli-vX.Y.Z` 就結束：
 
 ```powershell
-[System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("$env:LOCALAPPDATA\Programs\very-lazy\vlui.exe")) -match '--headless'
+nvl --version
 ```
 
-`True` 就可以直接用 `nvl`。`False` 表示那顆是舊的，改走原始碼模式（慢幾秒，但功能一樣）：
+而且這份指南是**內嵌在 binary 裡**、每次啟動自動刷新的（檔尾帶一行 vlui 的刷新標記；
+把那行拿掉就不會再被覆寫）。你讀到的指南就是這顆執行檔的行為，不會漂移——正常情況下
+不需要為了「它認不認得某個旗標」再做任何檢查。
+
+**唯一的例外**：`cli-v0.5.0` 及更早的執行檔既沒有 `--version`，也還會對不認得的旗標
+靜默開 TUI，所以 `nvl --version` 在那些版本上**會卡住等按鍵**。只有在「這份指南是別人
+手動放的／從別台匯出的，你不確定本機 binary 是哪一版」時，才改用這條不執行、瞬間完成的
+檢查：
+
+```powershell
+[System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes("$env:LOCALAPPDATA\Programs\very-lazy\vlui.exe")) -match '--version'
+```
+
+`False` 表示那顆是舊的：先請使用者跑 `nvl` → `/update` 升上去；臨時要跑就走原始碼模式
+（慢幾秒，功能一樣）：
 
 ```bash
 cd C:/test/very-lazy/ui-lab && go run . --headless <id> [旗標…]
 ```
 
-已知狀態（2026-08-25 更新）：`cli-v0.4.0` release 起 headless 已內建，這台機器的 `nvl`
-已換到 v0.4.0（檢查會回 `True`，直接用 `nvl`）。檢查照做不要省——別台機器可能還是舊版，
-而且 `ui-lab` 原始碼可能又領先安裝版。若真的遇到舊版：先建議跑 `nvl` → `/update` 升上去；
-臨時要跑就 fallback 到原始碼模式。發新版一律走 `.\release.ps1 <版號>`（CI 會把 tag 注入
-成 binary 版號，`/update` 的字串比對自然對齊），**不要**本機 build 亂填版號蓋過去。
+發新版一律走 `.\release.ps1 <版號>`（CI 會把 tag 注入成 binary 版號，`--version` 跟
+`/update` 的字串比對自然對齊），**不要**本機 build 亂填版號蓋過去。
 
-下面的例子都寫 `nvl`，你自己依上面的檢查結果決定要不要換成 `go run .`。
+下面的例子都寫 `nvl`；只有碰到上面那個例外才需要換成 `go run .`。
 
 ---
 
@@ -300,7 +311,7 @@ commit 歷史仍然看得出哪些改動屬於哪張單，而且不會有編譯�
 |---|---|---|
 | 0 | 成功（單建好；或 PR 建好且 Slack 發成功／本來就略過） | 完成 |
 | 1 | 一般失敗：工作項抓不到、型別不對（開 PR 模式非 Task／建單模式是 Task）、專案對應不到、本機路徑不是 git repo、建分支或建 PR 失敗、建單全部失敗 | 讀錯誤訊息對症處理 |
-| 2 | CLI 參數錯誤（缺 ID、旗標衝突、不認得的旗標）。**在碰任何 az/git 之前就結束，保證沒有副作用** | 修指令重下 |
+| 2 | CLI 參數錯誤（缺 ID、旗標衝突、不認得的旗標——**不帶 `--headless` 時也一樣 exit 2，不會退回 TUI**）。**在碰任何 az/git 之前就結束，保證沒有副作用** | 修指令重下 |
 | 3 | commit 檢查沒過：分支還沒 push，或分支相對 base 沒有新 commit | **要人先去寫 code/push，不是重跑就會好**。排程器可以選擇晚點再試 |
 | 4 | PR 已經建好了，但 Slack 通知失敗 | PR 是有效的、連結在輸出裡，只是沒人被通知到。別把它當成「PR 失敗」去重跑，會變成開兩張 PR。（會另印一行警告到 stderr，讓只監看 stderr 的排程器也收得到。）**修法是請使用者跑互動模式的 `/init` 重設 Slack token**（見下方） |
 | 5 | 建單模式部分成功（有些標題建好、有些失敗） | 看輸出逐行核對哪些成功。**只針對失敗的標題重跑**，成功的會被查重擋掉所以其實整條重跑也安全，但逐條比較清楚 |
