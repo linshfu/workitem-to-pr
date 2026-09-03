@@ -1,7 +1,58 @@
 # 📋 Very-Lazy
 
-> **Azure DevOps + Slack 自動化 CLI（互動式 TUI）**
+> **Azure DevOps + Slack 開發流程自動化 CLI**
 > 從工作項到建分支、建 PR、Slack 通知 reviewer，一條指令跑完日常開發流程。
+> Go 寫的互動式 TUI，另有給 AI 助手／排程器用的非互動 `--headless` 模式。
+
+<!-- TODO: 放一張 TUI 截圖或 GIF（`/task` 逐層導航那段最有畫面）。
+     檔案丟 docs/ 之後把這行換成 ![Very-Lazy TUI](docs/demo.gif) -->
+
+## 解決什麼問題
+
+一張單從指派到 PR 開好，中間是一串固定、不難、但很容易漏的手工步驟：查工作項屬性 →
+判斷它在 Feature / PBI / Task 的哪一層 → 對應到哪個 repo → 建分支 → 建 PR 時把工作項掛上去
+→ 挑 reviewer、開 auto-complete → 去 Slack 通知那個人。發版與 hotfix 是同一串再加上版號與雙 PR。
+
+漏掉一步的代價不對稱：例如 master 的分支原則有「PR 必須掛工作項」的必要檢查，忘了掛的 PR
+**建得出來但永遠不能合併**，而且通常要等到 PR 卡住才發現。Very-Lazy 把整串收成一條指令，
+並把那些「容易忘」的部分變成工具在動手前就擋下來的前置檢查。
+
+## 為什麼從 PowerShell 重寫成 Go
+
+前身是一套 PowerShell 腳本（`main.ps1` + `modules/`，3,355 行，v1.0 → v3.9，**仍留在這個 repo 裡**）。
+它把流程自動化得不錯，但撞到三面牆：
+
+| PowerShell 版的牆 | Go 版怎麼解 |
+|---|---|
+| 主流程有 24 處 `Read-Host` 互動提問——非互動環境（AI 助手、CI、排程器）硬跑會中途炸在提問上，所以那邊的規矩只能是「只組指令、不代跑」 | `--headless` 完全沒有互動提示，印純文字、回有語意的 exit code，設計上就是讓 AI 自己從頭跑到尾 |
+| 沒有工作項層級判斷：給一張 Feature 會直接建出 Task、跳過 PBI 層，結構是錯的 | 依 type 逐層往下（Feature → PBI → Task），自動綁父層、繼承 Area / Iteration、建立前查重 |
+| 散佈要 clone repo、裝模組、自己設別名；升版靠 `git pull` | 單一 `vlui.exe`：一行安裝，`/update` 連 GitHub Release 自我替換 |
+
+兩個延伸出來的設計，也是這個專案真正想證明的事：
+
+- **exit code 是契約**：`0` 成功／`1` 工具壞了／`2` 參數錯（保證還沒碰 az、無副作用）／`3` 在等人寫 code／
+  `4` PR 建好但 Slack 沒發出去（**別重跑，會開出兩張 PR**）／`5` 批次部分成功。把「工具壞了」跟
+  「在等人」分開，自動化才能做對的反應。不認得的旗標一律 `2`，絕不退回互動畫面卡住非互動的 shell。
+- **給 AI 的說明書跟著 binary 走**：散文會漂移，所以那份使用指南是 `go:embed` **內嵌在執行檔裡**的，
+  `/update` 換版時自動刷新，指南講的行為永遠等於這顆 binary 的行為。
+
+## 架構
+
+```text
+very-lazy/
+├── cli/            Go 版（現役）— 互動式 TUI + --headless，14 檔 9,210 行（含測試）
+│   ├── main.go         TUI 狀態機（Bubble Tea）、指令面板、頂層旗標
+│   ├── headless.go     --headless：非互動流程與 exit code 契約
+│   ├── az.go           工作項 / 分支 / PR：az CLI 呼叫與輸出解析
+│   ├── pbi.go pr.go release.go hotfix.go        各流程編排
+│   ├── config.go update.go skill.go styles.go   設定、自我更新、內嵌 AI 指南、樣式
+│   ├── *_test.go       表格驅動測試（分支命名、專案比對、旗標解析、階層判斷）
+│   └── skill/vlui-headless/  內嵌進 binary 的 AI 使用指南（＋ evals）
+├── main.ps1        PowerShell 前身（v3.9，仍可用）
+├── modules/        PS 版的 6 個模組
+├── install.ps1     一行安裝：抓 Release 的 vlui.exe、問別名、裝 AI 指南
+└── .github/workflows/release.yml   推 cli-v* tag 就在雲端 build 並發 Release
+```
 
 打開後輸入 `/` 會模糊搜尋指令、Tab 補全；直接打數字＝處理那張工作項。
 
@@ -19,7 +70,7 @@
 不用 clone、不用手動設定。開 PowerShell 貼上：
 
 ```powershell
-irm https://raw.githubusercontent.com/linshfu/workitem-to-pr/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/linshfu/very-lazy/main/install.ps1 | iex
 ```
 
 會做三件事：**① 檢查環境**（git / az，缺的直接告訴你怎麼裝）→ **② 下載主程式** → **③ 問你要用什麼名字呼叫它**（直接 Enter 用預設 `vl`，也可以打你自己喜歡的，例如 `agy`）。
@@ -79,7 +130,7 @@ vl --export-skill <目錄>     # 用其他 AI：吐出指南檔，再叫你的 A
 - **發版（維護者）**：推一個 `cli-v*` tag 就好 —— GitHub Actions（`.github/workflows/release.yml`）會在雲端 build `vlui.exe` 並發布 Release，`install.ps1` 一律抓 `releases/latest` 的 `vlui.exe`：
 
 ```powershell
-.\release.ps1 0.3.0     # = git tag cli-v0.3.0 + git push origin cli-v0.3.0（觸發 pipeline）
+.\release.ps1 0.6.1     # = git tag cli-v0.6.1 + git push origin cli-v0.6.1（觸發 pipeline）
 ```
 
 ---
@@ -88,6 +139,20 @@ vl --export-skill <目錄>     # 用其他 AI：吐出指南檔，再叫你的 A
 
 - Windows；執行期需要 `git` 與 `az`（含 `azure-devops` 擴充、已 `az login`）—— 首次跑 `/init` 會幫你檢查，缺的告訴你怎麼裝。
 - Slack 通知為選用（在 `/init` 設定或跳過）。
+
+---
+
+# 📜 以下是 PowerShell 前身版本的文件
+
+> 從這裡到「更新歷史」之前，講的都是 **PowerShell 版（`main.ps1` + `modules/`，v3.9）**——
+> 也就是上面「為什麼從 PowerShell 重寫成 Go」講的那個前身。它**仍然可用**，保留在 repo 裡
+> 是因為它是這個專案的前半段：一路從單檔 3500 行長到模組化，才長出用 Go 重寫的理由。
+>
+> **只想用工具的人不必往下讀**——回到上面的〈一行安裝〉就好，那是現役的 Go 版。
+> 下面的 `-NewTask` / `-Hotfix` 這類旗標是 PowerShell 版的介面，Go 版對應的是 `/task`、`/hotfix`。
+> **有三塊是兩版通用、不只屬於舊版的**：〈Slack Bot 設定教學〉（建 App / 加 scope / 邀 bot 進頻道）、
+> 〈設定檔完整說明〉（`config.json` 欄位兩版同名同義，只是 Go 版存在 `%AppData%\very-lazy\`）、
+> 〈安全性〉（機密處理原則相同）。
 
 ---
 
@@ -101,8 +166,8 @@ vl --export-skill <目錄>     # 用其他 AI：吐出指南檔，再叫你的 A
 ### 1. 取得專案
 
 ```powershell
-git clone https://github.com/linshfu/workitem-to-pr.git
-cd workitem-to-pr
+git clone https://github.com/linshfu/very-lazy.git
+cd very-lazy
 ```
 
 ### 2. 建立設定檔
@@ -169,7 +234,7 @@ az extension add --name azure-devops
 把下面這段加進 PowerShell profile（`notepad $PROFILE`，檔案不存在就直接存新檔）：
 
 ```powershell
-function vl { & "C:\path\to\workitem-to-pr\main.ps1" @args }
+function vl { & "C:\path\to\very-lazy\main.ps1" @args }
 ```
 
 重開 PowerShell 後就能用 `vl 22222` 這種短指令。
@@ -376,10 +441,12 @@ Release 流程另以標題比對 `projectPaths`；比不中時列出有 `localPa
 
 ---
 
-## 📦 模組架構
+## 📦 模組架構（PowerShell 版）
+
+> Go 版（現役）的原始碼結構在最前面的〈架構〉那節。
 
 ```
-workitem-to-pr/
+very-lazy/
 ├── main.ps1                  # 參數與路由入口
 ├── modules/
 │   ├── Config.psm1           # 配置管理（config.json / config.local.json / 環境變數）
@@ -416,6 +483,17 @@ workitem-to-pr/
 ---
 
 ## 📝 更新歷史
+
+### Go 版（`cli/`，現役 — tag `cli-v*`）
+
+- **cli-v0.6.0** (2026-09-03)：新增 `--version`；**不認得的旗標一律 exit 2，不再靜默退回互動 TUI**——舊版遇到不認識的旗標會開起 TUI 等按鍵，在非互動 shell 裡就是一個永遠不回來的指令。AI 指南因此改用 `nvl --version` 查版本，取代原本「用 ASCII 掃整顆 binary 找旗標字串」的檢查儀式
+- **cli-v0.5.0** (2026-08-25)：AI 使用指南改成 `go:embed` **內嵌在 binary 裡**，`/update` 換版時自動刷新（`--install-skill` 給 Claude Code、`--export-skill` 給其他 AI）；指南版本從此永遠等於 binary 行為
+- **cli-v0.4.0** (2026-08-25)：**`--headless` 非互動模式**成形——建單、開分支、開 PR，加上 `--release`（master + develop 雙 PR）與 `--hotfix`（分 branch / bump / PR 三步），以及 `0~5` 的 exit code 契約；發版與 hotfix 的 PR 強制掛工作項並明確決定 reviewer（master 有「PR 必須掛工作項」的必要檢查，沒掛的 PR 建得出來但永遠合不了）
+- **cli-v0.3.x** (2026-08-04 ~ 08-17)：`/task` 與 `/pbi` 合併成依 type 驅動的工作項導航器；階層顯示與綁定範圍修正、PBI 建立前查重、命令列直接啟動指令；`/release` 與 `/hotfix` 流程、步驟追蹤、快捷鍵提示統一到底部
+- **cli-v0.2.0** (2026-08-03)：Go TUI 原始碼進 repo（Bubble Tea）、`/update` 自我替換、GitHub Actions 發版流程（推 `cli-v*` tag 就在雲端 build 並發 Release）
+- **cli-v0.1.0** (2026-07-30)：一行安裝（`irm | iex`）
+
+### PowerShell 版（`main.ps1` + `modules/`，前身）
 
 - **v3.9** (2026-07-28)：新增 `-Init` 初始化精靈（環境檢查 → `az login` → 用 `az` 探索組織/專案/儲存庫互動產生 `config.json` → 選配 Slack 頻道/成員 → 問你要用什麼別名後寫進 `$PROFILE` → 驗證）；第一次無 `config.json` 執行時自動提示初始化；新增 `modules/Init.psm1`（`Start-Init`）
 - **v3.8** (2026-07-06)：`-NewTask` 支援一次建立多張 Task；PR 可同時連結多個工作項（`az repos pr create --work-items`）；修正手動 Release 誤帶 `--work-items 0`
