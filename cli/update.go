@@ -15,8 +15,8 @@ import (
 )
 
 const (
-	latestReleaseAPI  = "https://api.github.com/repos/linshfu/workitem-to-pr/releases/latest"
-	binaryDownloadURL = "https://github.com/linshfu/workitem-to-pr/releases/latest/download/vlui.exe"
+	latestReleaseAPI  = "https://api.github.com/repos/linshfu/very-lazy/releases/latest"
+	binaryDownloadURL = "https://github.com/linshfu/very-lazy/releases/latest/download/vlui.exe"
 )
 
 // updateMsg carries the latest release tag from an on-demand check.

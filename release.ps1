@@ -11,4 +11,4 @@ if ($branch -ne 'main') { throw "請在 main 分支發版（目前在 $branch）
 git tag $tag
 git push origin $tag
 Write-Host "已推 tag $tag，GitHub Actions 會自動 build 並發布 Release。" -ForegroundColor Green
-Write-Host "看進度：https://github.com/linshfu/workitem-to-pr/actions" -ForegroundColor Gray
+Write-Host "看進度：https://github.com/linshfu/very-lazy/actions" -ForegroundColor Gray

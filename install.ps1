@@ -1,6 +1,6 @@
 # very-lazy installer
 #
-#   irm https://raw.githubusercontent.com/linshfu/workitem-to-pr/main/install.ps1 | iex
+#   irm https://raw.githubusercontent.com/linshfu/very-lazy/main/install.ps1 | iex
 #
 # Downloads the very-lazy TUI, asks what name you want to call it by, and puts it
 # on your PATH. No git clone, no manual setup. Re-run any time to upgrade.
@@ -10,7 +10,7 @@ $ErrorActionPreference = 'Stop'
 try { [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12 } catch {}
 
 $Product     = 'very-lazy'
-$RepoSlug    = 'linshfu/workitem-to-pr'
+$RepoSlug    = 'linshfu/very-lazy'
 $BinaryName  = 'vlui.exe'
 $DefaultName = 'vl'
 $InstallDir  = if ($env:VL_INSTALL_DIR) { $env:VL_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Programs\$Product" }
